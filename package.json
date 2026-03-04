@@ -2,5 +2,8 @@
   "name": "nexus",
   "version": "0.1.0",
   "private": true,
-  "workspaces": ["gateway", "proto"]
+  "workspaces": ["gateway", "proto"],
+  "scripts": {
+    "gateway": "bun run --filter gateway dev"
+  }
 }

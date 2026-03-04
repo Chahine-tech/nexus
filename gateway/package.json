@@ -9,6 +9,9 @@
   "peerDependencies": {
     "typescript": "^5"
   },
+  "scripts": {
+    "dev": "bun --watch index.ts"
+  },
   "dependencies": {
     "@elysiajs/websocket": "^0.2.8",
     "@nexus/proto": "workspace:*",
