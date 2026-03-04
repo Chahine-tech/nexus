@@ -16,7 +16,10 @@ export class NodeDeadError extends Error {
 
 export class DeserializationError extends Error {
   readonly _tag = "DeserializationError"
-  constructor(public raw: Uint8Array, public cause: unknown) {
-    super("Failed to deserialize message")
+  public raw: Uint8Array
+
+  constructor(raw: Uint8Array, cause: unknown) {
+    super("Failed to deserialize message", { cause })
+    this.raw = raw
   }
 }
