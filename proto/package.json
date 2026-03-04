@@ -1,0 +1,6 @@
+{
+  "name": "@nexus/proto",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./messages.ts"
+}

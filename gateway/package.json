@@ -1,0 +1,18 @@
+{
+  "name": "gateway",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@elysiajs/websocket": "^0.2.8",
+    "@nexus/proto": "workspace:*",
+    "elysia": "^1.4.27",
+    "msgpackr": "^1.11.8"
+  }
+}
