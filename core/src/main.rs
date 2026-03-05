@@ -7,13 +7,18 @@ mod pagerank;
 mod crypto;
 mod sketch;
 mod node;
+mod http;
 
-use std::sync::Arc;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use node::Node;
-use network::messages::{MessageType, NetworkMessage, QueryRequest, encode_message, decode_message};
+use network::kademlia::RoutingTable;
+use network::gossip::GossipEngine;
 use network::quic::QuicTransport;
+use network::query_router::QueryRouter;
 use crypto::identity::NodeKeypair;
+use http::{AppState, build_router};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,56 +26,75 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    // Install ring TLS provider — must be called once before any rustls operation.
+    // Must be called once before any rustls/QUIC operation.
     rustls::crypto::ring::default_provider().install_default().ok();
 
-    tracing::info!("Nexus node starting");
+    let quic_port: u16 = std::env::var("NEXUS_QUIC_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9000);
+    let http_port: u16 = std::env::var("NEXUS_HTTP_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3001);
 
-    // --- Local search smoke test ---
-    let node = Arc::new(Node::new());
-    node.index_document(0, "Rust is a systems programming language focused on safety and performance");
-    node.index_document(1, "Python is a dynamic language great for scripting and data science");
-    node.index_document(2, "Rust enables fearless concurrency without data races");
+    tracing::info!(quic_port, http_port, "Nexus node starting");
 
-    let results = node.search("rust concurrency", 10);
-    tracing::info!(?results, "search results");
+    let keypair = NodeKeypair::generate();
+    let local_id = keypair.node_id();
 
-    // --- QUIC two-node smoke test ---
-    let kp_a = NodeKeypair::generate();
-    let kp_b = NodeKeypair::generate();
+    let quic_addr: SocketAddr = format!("0.0.0.0:{quic_port}").parse()?;
+    let transport = Arc::new(QuicTransport::bind(quic_addr, &keypair).await?);
+    tracing::info!(addr = %transport.endpoint.local_addr()?, "QUIC endpoint bound");
 
-    let node_a = QuicTransport::bind("127.0.0.1:0".parse()?, &kp_a).await?;
-    let node_b = QuicTransport::bind("127.0.0.1:0".parse()?, &kp_b).await?;
-    let addr_b = node_b.endpoint.local_addr()?;
+    let routing_table = Arc::new(Mutex::new(RoutingTable::new(local_id.clone())));
 
-    let qr = QueryRequest { terms: vec!["rust".to_string()], limit: 10, request_id: 1 };
-    let payload = encode_message(&qr)?;
-    let msg = NetworkMessage {
-        kind: MessageType::QueryRequest,
-        payload,
-        sender: kp_a.node_id(),
-        signature: [0u8; 64],
+    let search_node = Arc::new(Node::new());
+    search_node.index_document(0, "Rust is a systems programming language focused on safety and performance");
+    search_node.index_document(1, "Python is a dynamic language great for scripting and data science");
+    search_node.index_document(2, "Rust enables fearless concurrency without data races");
+
+    let query_router = Arc::new(QueryRouter::new(
+        Arc::clone(&search_node),
+        Arc::clone(&routing_table),
+        Arc::clone(&transport),
+        local_id.clone(),
+    ));
+
+    let gossip = Arc::new(GossipEngine::new(local_id, Arc::clone(&transport)));
+    gossip.update_local(search_node.index.doc_count());
+
+    // Gossip loop — broadcasts HLL sketches every 30 seconds.
+    // Peer list is empty until Kademlia bootstrap runs (week 4 integration).
+    let gossip_loop = {
+        let gossip = Arc::clone(&gossip);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                if let Err(e) = gossip.broadcast_idf(&[]).await {
+                    tracing::warn!(error = %e, "gossip broadcast failed");
+                }
+            }
+        })
     };
 
-    let (conn_res, accept_res) =
-        tokio::join!(node_a.connect(addr_b), node_b.accept());
+    // HTTP server — gateway calls /search and /health on this endpoint.
+    let http_addr: SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
+    let app = build_router(AppState { router: query_router });
+    let listener = tokio::net::TcpListener::bind(http_addr).await?;
+    tracing::info!(addr = %listener.local_addr()?, "HTTP server listening");
 
-    let conn_a = conn_res?;
-    let conn_b = accept_res?;
+    let http_server = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!(error = %e, "HTTP server error");
+        }
+    });
 
-    let (send_res, recv_res) =
-        tokio::join!(QuicTransport::send(&conn_a, &msg), QuicTransport::recv(&conn_b));
-
-    send_res?;
-    let received = recv_res?;
-
-    let decoded_qr: QueryRequest = decode_message(&received.payload)?;
-    tracing::info!(
-        sender = ?received.sender,
-        request_id = decoded_qr.request_id,
-        terms = ?decoded_qr.terms,
-        "QUIC smoke test: message received"
-    );
+    tokio::select! {
+        _ = gossip_loop => tracing::warn!("gossip loop exited"),
+        _ = http_server => tracing::warn!("HTTP server exited"),
+    }
 
     Ok(())
 }

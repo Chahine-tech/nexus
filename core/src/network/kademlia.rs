@@ -2,6 +2,18 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+// ---------------------------------------------------------------------------
+// Consistent hashing helper
+// ---------------------------------------------------------------------------
+
+/// Converts a search term to a NodeId-shaped key via blake3.
+///
+/// Used for consistent hashing: the node whose NodeId has minimum XOR distance
+/// to this key is "responsible" for that term's index shard.
+pub fn term_to_key(term: &str) -> NodeId {
+    NodeId(*blake3::hash(term.as_bytes()).as_bytes())
+}
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -96,6 +108,15 @@ impl RoutingTable {
         all.sort_by_key(|n| Self::xor_distance(target, &n.id));
         all.truncate(k);
         all
+    }
+
+    /// Returns the single node XOR-closest to `term`'s blake3 key.
+    ///
+    /// Returns None if the routing table is empty.
+    /// Used for consistent hashing: routes each term to its responsible shard node.
+    pub fn responsible_node(&self, term: &str) -> Option<NodeInfo> {
+        let key = term_to_key(term);
+        self.closest_nodes(&key, 1).into_iter().next()
     }
 }
 
@@ -288,6 +309,35 @@ mod tests {
         for bucket in &table.buckets {
             assert!(bucket.len() <= K);
         }
+    }
+
+    #[test]
+    fn term_to_key_is_deterministic() {
+        let k1 = term_to_key("rust");
+        let k2 = term_to_key("rust");
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn term_to_key_differs_for_different_terms() {
+        assert_ne!(term_to_key("rust"), term_to_key("python"));
+    }
+
+    #[test]
+    fn responsible_node_returns_none_for_empty_table() {
+        let table = RoutingTable::new(NodeId([0u8; 32]));
+        assert!(table.responsible_node("rust").is_none());
+    }
+
+    #[test]
+    fn responsible_node_returns_single_node_when_only_one() {
+        let local = NodeId([0u8; 32]);
+        let mut table = RoutingTable::new(local);
+        let peer = NodeInfo { id: NodeId([1u8; 32]), addr: "127.0.0.1:0".parse().unwrap() };
+        table.update(peer.clone());
+        let responsible = table.responsible_node("anything");
+        assert!(responsible.is_some());
+        assert_eq!(responsible.unwrap().id, peer.id);
     }
 
     #[test]

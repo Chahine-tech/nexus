@@ -55,6 +55,7 @@ pub enum MessageType {
     QueryRequest,
     QueryResponse,
     GossipIdf,
+    GossipIdfSketch,
     GossipPagerank,
     DhtFindNode,
     DhtStore,
