@@ -8,6 +8,7 @@ use thiserror::Error;
 
 use crate::network::messages::{MessageType, NetworkMessage, NodeId, encode_message};
 use crate::network::quic::{QuicTransport, TransportError};
+use crate::pagerank::distributed::GossipPagerank;
 use crate::sketch::hyperloglog::HyperLogLog;
 
 #[derive(Debug, Error)]
@@ -40,7 +41,8 @@ pub struct IdfGossipState {
     pub timestamp: u64,
 }
 
-/// Gossip engine — propagates `doc_count` heartbeats + HyperLogLog IDF sketches.
+/// Gossip engine — propagates doc_count heartbeats, HyperLogLog IDF sketches,
+/// and partial PageRank contributions.
 ///
 /// All `std::sync` locks: never held across `.await`. `DashMap` for lock-free peers.
 pub struct GossipEngine {
@@ -48,18 +50,27 @@ pub struct GossipEngine {
     peers: DashMap<NodeId, GossipState>,
     local_idf: Arc<RwLock<HyperLogLog>>,
     peer_idf: DashMap<NodeId, IdfGossipState>,
+    local_pagerank: Arc<RwLock<GossipPagerank>>,
+    peer_pagerank: DashMap<NodeId, GossipPagerank>,
     transport: Arc<QuicTransport>,
 }
 
 impl GossipEngine {
     pub fn new(node_id: NodeId, transport: Arc<QuicTransport>) -> Self {
         let local_state =
-            GossipState { node_id, doc_count: 0, timestamp: current_timestamp() };
+            GossipState { node_id: node_id.clone(), doc_count: 0, timestamp: current_timestamp() };
+        let empty_pr = GossipPagerank {
+            node_id: node_id.clone(),
+            partial_scores: std::collections::HashMap::new(),
+            timestamp: 0,
+        };
         Self {
             local_state: Arc::new(RwLock::new(local_state)),
             peers: DashMap::new(),
             local_idf: Arc::new(RwLock::new(HyperLogLog::new())),
             peer_idf: DashMap::new(),
+            local_pagerank: Arc::new(RwLock::new(empty_pr)),
+            peer_pagerank: DashMap::new(),
             transport,
         }
     }
@@ -200,6 +211,101 @@ impl GossipEngine {
                 }
                 Err(e) => {
                     tracing::warn!(?addr, error = %e, "idf gossip connect failed");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------------
+    // PageRank gossip — partial score propagation
+    // ---------------------------------------------------------------------------
+
+    /// Replaces local partial PageRank scores.
+    ///
+    /// Call this after `LocalPageRank::iterate()` with `scores_snapshot()`.
+    /// Lock is acquired and released immediately — never held across `.await`.
+    pub fn update_pagerank(&self, scores: std::collections::HashMap<u32, f32>) {
+        let node_id = {
+            let guard = self.local_state.read().expect("gossip RwLock poisoned");
+            guard.node_id.clone()
+        };
+        let msg = GossipPagerank::from_scores(node_id, scores, current_timestamp());
+        let mut guard = self.local_pagerank.write().expect("local_pagerank RwLock poisoned");
+        *guard = msg;
+    }
+
+    /// Merges an incoming peer PageRank message using timestamp-wins semantics. Sync.
+    ///
+    /// Newer messages (higher timestamp) replace the stored entry entirely.
+    /// This prevents double-counting when a broadcast is repeated.
+    pub fn handle_pagerank_incoming(&self, state: GossipPagerank) {
+        self.peer_pagerank
+            .entry(state.node_id.clone())
+            .and_modify(|existing| {
+                if state.timestamp > existing.timestamp {
+                    *existing = state.clone();
+                }
+            })
+            .or_insert(state);
+    }
+
+    /// Computes the globally-merged PageRank score for `doc_id`.
+    ///
+    /// Sums the local score and all peer contributions for `doc_id`, then
+    /// normalizes by the sum of all scores across all nodes. Returns `0.0`
+    /// if no scores are available.
+    ///
+    /// Lock released before iterating `peer_pagerank` — no lock held across DashMap scan.
+    pub fn global_pagerank(&self, doc_id: u32) -> f32 {
+        // Clone local scores (lock released immediately).
+        let local_scores = {
+            let guard = self.local_pagerank.read().expect("local_pagerank RwLock poisoned");
+            guard.partial_scores.clone()
+        };
+
+        // Accumulate all scores across local + peers into a flat map.
+        let mut combined: std::collections::HashMap<u32, f32> = local_scores;
+        for entry in self.peer_pagerank.iter() {
+            for (&id, &score) in &entry.value().partial_scores {
+                *combined.entry(id).or_insert(0.0) += score;
+            }
+        }
+
+        let total: f32 = combined.values().sum();
+        if total <= 0.0 {
+            return 0.0;
+        }
+        combined.get(&doc_id).copied().unwrap_or(0.0) / total
+    }
+
+    /// Broadcasts local PageRank scores to all given peer addresses. Async.
+    ///
+    /// Lock released before any `.await` (consistent with `broadcast_idf` pattern).
+    pub async fn broadcast_pagerank(&self, peers: &[SocketAddr]) -> Result<(), GossipError> {
+        let (local_node_id, pr_msg) = {
+            let local_guard = self.local_state.read().expect("gossip RwLock poisoned");
+            let pr_guard = self.local_pagerank.read().expect("local_pagerank RwLock poisoned");
+            (local_guard.node_id.clone(), pr_guard.clone())
+        };
+
+        let payload = encode_message(&pr_msg).map_err(TransportError::Message)?;
+
+        for &addr in peers {
+            let msg = NetworkMessage {
+                kind: MessageType::GossipPagerank,
+                payload: payload.clone(),
+                sender: local_node_id.clone(),
+                signature: [0u8; 64],
+            };
+            match self.transport.connect(addr).await {
+                Ok(conn) => {
+                    if let Err(e) = QuicTransport::send(&conn, &msg).await {
+                        tracing::warn!(?addr, error = %e, "pagerank gossip send failed");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(?addr, error = %e, "pagerank gossip connect failed");
                 }
             }
         }

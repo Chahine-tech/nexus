@@ -57,14 +57,31 @@ impl Fetcher {
 }
 
 
+// Static selectors — parsed once, valid by construction (literals can't be invalid CSS).
+static SKIP_SEL: std::sync::OnceLock<Selector> = std::sync::OnceLock::new();
+static BODY_SEL: std::sync::OnceLock<Selector> = std::sync::OnceLock::new();
+static ANCHOR_SEL: std::sync::OnceLock<Selector> = std::sync::OnceLock::new();
+
+fn skip_sel() -> &'static Selector {
+    SKIP_SEL.get_or_init(|| {
+        Selector::parse("script, style, noscript")
+            .expect("static CSS selector is valid")
+    })
+}
+fn body_sel() -> &'static Selector {
+    BODY_SEL.get_or_init(|| Selector::parse("body").expect("static CSS selector is valid"))
+}
+fn anchor_sel() -> &'static Selector {
+    ANCHOR_SEL
+        .get_or_init(|| Selector::parse("a[href]").expect("static CSS selector is valid"))
+}
+
 /// Extracts plain text and resolved outbound links from raw HTML.
 fn extract(html: &str, base: &Url) -> (String, Vec<Url>) {
     let doc = Html::parse_document(html);
-    let skip_sel = Selector::parse("script, style, noscript").unwrap();
-    let body_sel = Selector::parse("body").unwrap();
 
     let text = doc
-        .select(&body_sel)
+        .select(body_sel())
         .next()
         .map(|body| {
             body.descendants()
@@ -72,7 +89,7 @@ fn extract(html: &str, base: &Url) -> (String, Vec<Url>) {
                     node.value().is_text()
                         && !node.ancestors().any(|a| {
                             ElementRef::wrap(a)
-                                .map(|el| skip_sel.matches(&el))
+                                .map(|el| skip_sel().matches(&el))
                                 .unwrap_or(false)
                         })
                 })
@@ -83,9 +100,8 @@ fn extract(html: &str, base: &Url) -> (String, Vec<Url>) {
         })
         .unwrap_or_default();
 
-    let anchor_sel = Selector::parse("a[href]").unwrap();
     let links = doc
-        .select(&anchor_sel)
+        .select(anchor_sel())
         .filter_map(|el| el.value().attr("href"))
         .filter_map(|href| base.join(href).ok())
         .filter(|u| u.scheme() == "http" || u.scheme() == "https")

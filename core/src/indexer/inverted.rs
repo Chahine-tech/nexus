@@ -104,6 +104,16 @@ impl InvertedIndex {
     pub fn vocabulary_size(&self) -> usize {
         self.postings.len()
     }
+
+    /// Returns a snapshot of all indexed terms.
+    pub fn all_terms(&self) -> Vec<String> {
+        self.postings.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Returns all indexed doc_ids.
+    pub fn all_doc_ids(&self) -> Vec<u32> {
+        self.doc_lengths.iter().map(|e| *e.key()).collect()
+    }
 }
 
 impl Default for InvertedIndex {

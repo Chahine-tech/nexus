@@ -6,3 +6,4 @@ pub mod crawler;
 pub mod node;
 pub mod network;
 pub mod crypto;
+pub mod pagerank;

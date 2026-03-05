@@ -51,7 +51,7 @@ fn rust_queries() -> &'static RustQueries {
     RUST_QUERIES.get_or_init(|| {
         let lang = tree_sitter_rust::LANGUAGE.into();
         RustQueries {
-            functions: Query::new(&lang, "(function_item name: (identifier) @fn)").unwrap(),
+            functions: Query::new(&lang, "(function_item name: (identifier) @fn)").expect("static tree-sitter query is valid"),
             types: Query::new(
                 &lang,
                 "[(struct_item name: (type_identifier) @ty)
@@ -59,9 +59,9 @@ fn rust_queries() -> &'static RustQueries {
                   (trait_item name: (type_identifier) @ty)
                   (impl_item type: (type_identifier) @ty)]",
             )
-            .unwrap(),
-            imports: Query::new(&lang, "(use_declaration argument: (_) @imp)").unwrap(),
-            strings: Query::new(&lang, "(string_literal) @s").unwrap(),
+            .expect("static tree-sitter query is valid"),
+            imports: Query::new(&lang, "(use_declaration argument: (_) @imp)").expect("static tree-sitter query is valid"),
+            strings: Query::new(&lang, "(string_literal) @s").expect("static tree-sitter query is valid"),
         }
     })
 }
@@ -75,16 +75,16 @@ fn ts_queries() -> &'static TsQueries {
                 "[(function_declaration name: (identifier) @fn)
                   (method_definition name: (property_identifier) @fn)]",
             )
-            .unwrap(),
+            .expect("static tree-sitter query is valid"),
             types: Query::new(
                 &lang,
                 "[(class_declaration name: (type_identifier) @ty)
                   (interface_declaration name: (type_identifier) @ty)
                   (type_alias_declaration name: (type_identifier) @ty)]",
             )
-            .unwrap(),
-            imports: Query::new(&lang, "(import_statement source: (string) @imp)").unwrap(),
-            strings: Query::new(&lang, "(string) @s").unwrap(),
+            .expect("static tree-sitter query is valid"),
+            imports: Query::new(&lang, "(import_statement source: (string) @imp)").expect("static tree-sitter query is valid"),
+            strings: Query::new(&lang, "(string) @s").expect("static tree-sitter query is valid"),
         }
     })
 }
@@ -98,15 +98,15 @@ fn py_queries() -> &'static PyQueries {
                 "[(function_definition name: (identifier) @fn)
                   (decorated_definition definition: (function_definition name: (identifier) @fn))]",
             )
-            .unwrap(),
-            types: Query::new(&lang, "(class_definition name: (identifier) @ty)").unwrap(),
+            .expect("static tree-sitter query is valid"),
+            types: Query::new(&lang, "(class_definition name: (identifier) @ty)").expect("static tree-sitter query is valid"),
             imports: Query::new(
                 &lang,
                 "[(import_statement name: (dotted_name) @imp)
                   (import_from_statement module_name: (dotted_name) @imp)]",
             )
-            .unwrap(),
-            strings: Query::new(&lang, "(string) @s").unwrap(),
+            .expect("static tree-sitter query is valid"),
+            strings: Query::new(&lang, "(string) @s").expect("static tree-sitter query is valid"),
         }
     })
 }
@@ -188,30 +188,30 @@ mod tests {
 
     #[test]
     fn test_extract_rust_functions() {
-        let parser = AstParser::new().unwrap();
+        let parser = AstParser::new().expect("static tree-sitter query is valid");
         let src = b"fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() {}";
-        let ast = parser.parse(Language::Rust, src).unwrap();
-        let features = extract(&ast).unwrap();
+        let ast = parser.parse(Language::Rust, src).expect("static tree-sitter query is valid");
+        let features = extract(&ast).expect("static tree-sitter query is valid");
         assert!(features.function_names.contains(&"add".to_string()));
         assert!(features.function_names.contains(&"main".to_string()));
     }
 
     #[test]
     fn test_extract_rust_types() {
-        let parser = AstParser::new().unwrap();
+        let parser = AstParser::new().expect("static tree-sitter query is valid");
         let src = b"struct Foo { x: i32 }\nenum Bar { A, B }";
-        let ast = parser.parse(Language::Rust, src).unwrap();
-        let features = extract(&ast).unwrap();
+        let ast = parser.parse(Language::Rust, src).expect("static tree-sitter query is valid");
+        let features = extract(&ast).expect("static tree-sitter query is valid");
         assert!(features.type_names.contains(&"Foo".to_string()));
         assert!(features.type_names.contains(&"Bar".to_string()));
     }
 
     #[test]
     fn test_extract_python_functions() {
-        let parser = AstParser::new().unwrap();
+        let parser = AstParser::new().expect("static tree-sitter query is valid");
         let src = b"def greet(name):\n    return 'hello ' + name\n";
-        let ast = parser.parse(Language::Python, src).unwrap();
-        let features = extract(&ast).unwrap();
+        let ast = parser.parse(Language::Python, src).expect("static tree-sitter query is valid");
+        let features = extract(&ast).expect("static tree-sitter query is valid");
         assert!(features.function_names.contains(&"greet".to_string()));
     }
 }
