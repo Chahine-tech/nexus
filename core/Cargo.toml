@@ -3,6 +3,10 @@ name = "nexus-core"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "nexus_core"
+path = "src/lib.rs"
+
 [[bin]]
 name = "nexus"
 path = "src/main.rs"
