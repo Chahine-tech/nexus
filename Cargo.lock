@@ -1360,6 +1360,7 @@ dependencies = [
  "rustls",
  "scraper",
  "serde",
+ "streaming-iterator",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

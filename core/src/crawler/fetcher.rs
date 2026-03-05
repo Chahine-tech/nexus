@@ -56,11 +56,6 @@ impl Fetcher {
     }
 }
 
-impl Default for Fetcher {
-    fn default() -> Self {
-        Self::new().expect("failed to build HTTP client")
-    }
-}
 
 /// Extracts plain text and resolved outbound links from raw HTML.
 fn extract(html: &str, base: &Url) -> (String, Vec<Url>) {
