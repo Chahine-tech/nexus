@@ -20,7 +20,7 @@ rmp-serde = "1"
 # Index
 roaring = "0.11"
 dashmap = "6"
-blake3 = "1"
+blake3 = "=1.8.3"
 
 rayon = "1"
 
@@ -32,10 +32,10 @@ tree-sitter-python = "0.25"
 half = "2"
 hnsw_rs = "0.3"
 
-quinn = "0.11"
-rustls = { version = "0.23", features = ["ring"] }
+quinn = "=0.11.9"
+rustls = { version = "=0.23.37", features = ["ring"] }
 
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
 
 reqwest = { version = "0.13", features = ["rustls"], default-features = false }
 url = "2"
@@ -47,6 +47,8 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 streaming-iterator = "0.1.9"
+rcgen = "=0.13.2"
+rand = "0.8"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
