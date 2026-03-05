@@ -3,6 +3,10 @@ name = "nexus-core"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "nexus_core"
+path = "src/lib.rs"
+
 [[bin]]
 name = "nexus"
 path = "src/main.rs"
@@ -33,11 +37,16 @@ rustls = { version = "0.23", features = ["ring"] }
 
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 
+reqwest = { version = "0.13", features = ["rustls"], default-features = false }
+url = "2"
+scraper = "0.25"
+
 anyhow = "1"
 thiserror = "2"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+streaming-iterator = "0.1.9"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
