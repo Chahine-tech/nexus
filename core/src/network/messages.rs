@@ -59,8 +59,12 @@ pub enum MessageType {
     GossipPagerank,
     DhtFindNode,
     DhtStore,
+    /// Periodic liveness ping — sender reports its doc_count.
     Heartbeat,
+    /// Sent by a new node on first connection to bootstrap into the cluster.
     NodeJoin,
+    /// Transfers a posting-list shard from one node to another (rebalancing).
+    IndexShard,
 }
 
 /// Top-level network envelope — wraps any payload with sender identity + signature.
@@ -87,6 +91,37 @@ pub struct QueryResponse {
     pub request_id: u64,
     pub results: Vec<(u32, f32)>,
     pub node_id: NodeId,
+}
+
+/// Payload for `MessageType::Heartbeat` — liveness ping with basic stats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatPayload {
+    pub doc_count: u64,
+    /// Unix epoch seconds.
+    pub timestamp: u64,
+}
+
+/// Payload for `MessageType::NodeJoin` — sent by a new node on startup.
+///
+/// The receiving node adds the sender to its routing table and replies with
+/// its own `NodeJoin` so the new node learns at least one peer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeJoinPayload {
+    /// The address on which the joining node accepts QUIC connections.
+    pub listen_addr: std::net::SocketAddr,
+    pub doc_count: u64,
+}
+
+/// Payload for `MessageType::IndexShard` — transfers posting-list data.
+///
+/// Used during rebalancing: a node sends one shard per term it is offloading.
+/// The receiver calls `Node::merge_posting_shard` for each entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexShardPayload {
+    /// Term whose posting list is being transferred.
+    pub term: String,
+    /// Serialized `PostingList` (msgpack via `rmp_serde`).
+    pub posting_bytes: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------

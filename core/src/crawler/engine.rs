@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::sync::Semaphore;
+use tracing::instrument;
 use url::Url;
 
 use crate::crawler::fetcher::{FetchError, Fetcher};
@@ -74,6 +75,7 @@ impl Crawler {
     /// Seeds the frontier and starts the crawl loop.
     ///
     /// Fetches robots.txt for each seed origin before enqueuing.
+    #[instrument(skip(self), fields(seed_count = seeds.len()))]
     pub async fn run(&self, seeds: Vec<Url>) -> Result<(), CrawlerError> {
         // Pre-fetch robots.txt for each unique origin.
         for seed in &seeds {

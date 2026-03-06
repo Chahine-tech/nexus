@@ -6,6 +6,8 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use tracing::instrument;
+
 use crate::network::messages::{MessageType, NetworkMessage, NodeId, encode_message};
 use crate::network::quic::{QuicTransport, TransportError};
 use crate::pagerank::distributed::GossipPagerank;
@@ -98,6 +100,7 @@ impl GossipEngine {
     /// Broadcasts local state to all given peer addresses. Async.
     ///
     /// The RwLock is acquired, state cloned, and lock released **before** any `.await`.
+    #[instrument(skip(self), fields(peer_count = peers.len()))]
     pub async fn broadcast(&self, peers: &[SocketAddr]) -> Result<(), GossipError> {
         // Clone state while holding the lock, then release before any .await.
         let state = {
@@ -178,6 +181,7 @@ impl GossipEngine {
     /// Broadcasts the local HyperLogLog sketch to all given peer addresses. Async.
     ///
     /// The RwLock is acquired, sketch cloned, and lock released **before** any `.await`.
+    #[instrument(skip(self), fields(peer_count = peers.len()))]
     pub async fn broadcast_idf(&self, peers: &[SocketAddr]) -> Result<(), GossipError> {
         let local_node_id = {
             let guard = self.local_state.read().expect("gossip RwLock poisoned");
@@ -282,6 +286,7 @@ impl GossipEngine {
     /// Broadcasts local PageRank scores to all given peer addresses. Async.
     ///
     /// Lock released before any `.await` (consistent with `broadcast_idf` pattern).
+    #[instrument(skip(self), fields(peer_count = peers.len()))]
     pub async fn broadcast_pagerank(&self, peers: &[SocketAddr]) -> Result<(), GossipError> {
         let (local_node_id, pr_msg) = {
             let local_guard = self.local_state.read().expect("gossip RwLock poisoned");

@@ -22,7 +22,7 @@ use indexer::storage;
 use network::gossip::{GossipEngine, GossipState, IdfGossipState};
 use sketch::hyperloglog::HyperLogLog;
 use network::kademlia::{Kademlia, NodeInfo, RoutingTable};
-use network::messages::MessageType;
+use network::messages::{HeartbeatPayload, IndexShardPayload, MessageType, NodeJoinPayload};
 use network::query_router::QueryRouter;
 use network::quic::QuicTransport;
 use node::Node;
@@ -99,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         let accept_table = Arc::clone(&routing_table);
         let accept_gossip = Arc::clone(&gossip);
         let accept_keypair = Arc::clone(&keypair);
+        let accept_node = Arc::clone(&search_node);
         tokio::spawn(async move {
             tracing::debug!(node_id = ?accept_transport.node_id, "QUIC accept loop started");
             loop {
@@ -115,10 +116,10 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     // Update routing table with sender.
-                    if let Ok(mut table) = accept_table.lock() {
-                        if let Ok(remote_addr) = conn.remote_address().to_string().parse() {
-                            table.update(NodeInfo { id: msg.sender.clone(), addr: remote_addr });
-                        }
+                    if let Ok(mut table) = accept_table.lock()
+                        && let Ok(remote_addr) = conn.remote_address().to_string().parse()
+                    {
+                        table.update(NodeInfo { id: msg.sender.clone(), addr: remote_addr });
                     }
 
                     // Dispatch by message type.
@@ -135,6 +136,57 @@ async fn main() -> anyhow::Result<()> {
                                 network::messages::decode_message::<GossipPagerank>(&msg.payload)
                             {
                                 accept_gossip.handle_pagerank_incoming(pr);
+                            }
+                        }
+                        MessageType::Heartbeat => {
+                            if let Ok(hb) =
+                                network::messages::decode_message::<HeartbeatPayload>(&msg.payload)
+                            {
+                                accept_gossip.update_local(hb.doc_count);
+                                tracing::debug!(
+                                    sender = ?msg.sender,
+                                    doc_count = hb.doc_count,
+                                    "heartbeat received"
+                                );
+                            }
+                        }
+                        MessageType::NodeJoin => {
+                            if let Ok(join) =
+                                network::messages::decode_message::<NodeJoinPayload>(&msg.payload)
+                            {
+                                if let Ok(mut table) = accept_table.lock() {
+                                    table.update(NodeInfo {
+                                        id: msg.sender.clone(),
+                                        addr: join.listen_addr,
+                                    });
+                                }
+                                tracing::info!(
+                                    sender = ?msg.sender,
+                                    addr = %join.listen_addr,
+                                    doc_count = join.doc_count,
+                                    "node joined"
+                                );
+                            }
+                        }
+                        MessageType::IndexShard => {
+                            if let Ok(shard) =
+                                network::messages::decode_message::<IndexShardPayload>(&msg.payload)
+                                && let Ok(posting) = rmp_serde::from_slice(&shard.posting_bytes)
+                            {
+                                if let Err(e) =
+                                    accept_node.merge_posting_shard(&shard.term, posting)
+                                {
+                                    tracing::warn!(
+                                        term = %shard.term,
+                                        error = %e,
+                                        "shard merge failed"
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        term = %shard.term,
+                                        "shard merged"
+                                    );
+                                }
                             }
                         }
                         _ => {}

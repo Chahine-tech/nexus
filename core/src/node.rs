@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use tracing::instrument;
+
 use crate::ast::features;
 use crate::ast::normalizer::tokens_from_features;
 use crate::ast::parser::{AstError, AstParser};
@@ -61,6 +63,7 @@ impl Node {
     }
 
     /// Tokenizes `text` and indexes it under `doc_id`.
+    #[instrument(skip(self, text), fields(doc_id))]
     pub fn index_document(&self, doc_id: u32, text: &str) {
         let tokens = self.tokenizer.tokenize(text);
         self.index.index_document(doc_id, &tokens);
@@ -68,6 +71,7 @@ impl Node {
     }
 
     /// Returns the top `limit` results for `query`, sorted by BM25 score.
+    #[instrument(skip(self), fields(terms_count))]
     pub fn search(&self, query: &str, limit: usize) -> Vec<(u32, f32)> {
         let terms = self.tokenizer.tokenize(query);
         self.scorer.search(&terms, limit)
@@ -125,6 +129,7 @@ impl Node {
     /// (Re-)builds the HNSW vector index from the current inverted index.
     ///
     /// Must be called after bulk indexing before `search_hybrid` returns vector results.
+    #[instrument(skip(self))]
     pub fn rebuild_vector_index(&self) -> Result<(), VectorError> {
         let vi = VectorIndex::new(Arc::clone(&self.index))?;
         let doc_ids = self.index.all_doc_ids();
@@ -140,6 +145,7 @@ impl Node {
     /// Hybrid BM25 + vector ANN search.
     ///
     /// Falls back to pure BM25 if the vector index has not been built yet.
+    #[instrument(skip(self), fields(limit))]
     pub fn search_hybrid(&self, query: &str, limit: usize) -> Vec<(u32, f32)> {
         let terms = self.tokenizer.tokenize(query);
         let guard = self.vector.read().expect("vector RwLock poisoned");
@@ -192,6 +198,19 @@ impl Node {
     }
 
     // -----------------------------------------------------------------------
+    // Shard export / import (rebalancing)
+    // -----------------------------------------------------------------------
+
+    /// Serializes the posting list for `term` as msgpack bytes.
+    ///
+    /// Returns `None` if the term is not in this node's index.
+    /// Called by the HTTP `/export-shard` endpoint during gateway rebalancing.
+    pub fn export_posting_shard(&self, term: &str) -> Option<Vec<u8>> {
+        let posting = self.index.lookup(term)?;
+        rmp_serde::to_vec(&posting).ok()
+    }
+
+    // -----------------------------------------------------------------------
     // Code-file indexing (AST pipeline)
     // -----------------------------------------------------------------------
 
@@ -202,6 +221,7 @@ impl Node {
     /// extracted function names, type names, imports, and tokenized literals.
     ///
     /// Returns `AstError::UnsupportedLanguage` for non-Rust/TS/Python files.
+    #[instrument(skip(self, source), fields(doc_id, path = %path.display()))]
     pub async fn index_code_file(
         &self,
         doc_id: u32,

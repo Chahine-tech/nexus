@@ -8,6 +8,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as TlsError, SignatureScheme};
 use thiserror::Error;
+use tracing::instrument;
 
 use crate::crypto::identity::NodeKeypair;
 use crate::network::messages::{MessageError, NetworkMessage, decode_message, encode_message};
@@ -108,6 +109,7 @@ impl QuicTransport {
     /// Generates a self-signed TLS certificate. The client side skips
     /// certificate verification — identity is established via ed25519 signatures
     /// on the message layer instead.
+    #[instrument(skip(keypair), fields(%addr))]
     pub async fn bind(addr: SocketAddr, keypair: &NodeKeypair) -> Result<Self, TransportError> {
         // 1. Generate self-signed certificate via rcgen.
         let CertifiedKey { cert, key_pair } =
@@ -142,6 +144,7 @@ impl QuicTransport {
     }
 
     /// Opens a QUIC connection to `addr`.
+    #[instrument(skip(self), fields(%addr))]
     pub async fn connect(&self, addr: SocketAddr) -> Result<Connection, TransportError> {
         // "nexus" matches the SAN in our self-signed cert.
         Ok(self.endpoint.connect(addr, "nexus")?.await?)
@@ -160,6 +163,7 @@ impl QuicTransport {
     /// Sends a `NetworkMessage` over `conn` using a unidirectional stream.
     ///
     /// Wire format: 4-byte big-endian length prefix + msgpack payload.
+    #[instrument(skip(conn, msg), fields(kind = ?msg.kind))]
     pub async fn send(conn: &Connection, msg: &NetworkMessage) -> Result<(), TransportError> {
         let payload = encode_message(msg)?;
         let len = (payload.len() as u32).to_be_bytes();
@@ -172,6 +176,7 @@ impl QuicTransport {
     }
 
     /// Receives one `NetworkMessage` from `conn`.
+    #[instrument(skip(conn))]
     pub async fn recv(conn: &Connection) -> Result<NetworkMessage, TransportError> {
         let mut stream = conn.accept_uni().await?;
 

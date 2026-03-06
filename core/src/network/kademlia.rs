@@ -16,6 +16,7 @@ pub fn term_to_key(term: &str) -> NodeId {
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::instrument;
 
 use crate::network::messages::{MessageType, NetworkMessage, NodeId, decode_message, encode_message};
 use crate::network::quic::{QuicTransport, TransportError};
@@ -141,6 +142,7 @@ impl Kademlia {
     }
 
     /// Bootstraps the node by connecting to known peers and running FIND_NODE(self).
+    #[instrument(skip(self), fields(bootstrap_count = bootstrap_nodes.len()))]
     pub async fn bootstrap(
         &self,
         bootstrap_nodes: Vec<SocketAddr>,
@@ -176,6 +178,7 @@ impl Kademlia {
     }
 
     /// Iterative FIND_NODE — queries the closest known nodes for `target`.
+    #[instrument(skip(self))]
     pub async fn find_node(
         &self,
         target: NodeId,

@@ -50,6 +50,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health_handler))
         .route("/stats", get(stats_handler))
         .route("/crawl", post(crawl_handler))
+        .route("/export-shard", get(export_shard_handler))
+        .route("/merge-shard", post(merge_shard_handler))
         .with_state(state)
 }
 
@@ -135,6 +137,57 @@ async fn stats_handler(State(state): State<AppState>) -> Json<StatsResponse> {
         estimated_global_terms,
         peer_count,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Shard export/import — used by the gateway for rebalancing on node death.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ExportShardParams {
+    term: String,
+}
+
+/// Returns the raw msgpack bytes of the posting list for `term`.
+/// Gateway calls this on the dead node before routing to the successor.
+async fn export_shard_handler(
+    State(state): State<AppState>,
+    Query(params): Query<ExportShardParams>,
+) -> Result<axum::response::Response, StatusCode> {
+    use axum::body::Body;
+    use axum::http::header;
+
+    match state.node.export_posting_shard(&params.term) {
+        Some(bytes) => Ok(axum::response::Response::builder()
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(bytes))
+            .unwrap()),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+#[derive(Deserialize)]
+struct MergeShardBody {
+    term: String,
+    /// base64-encoded msgpack PostingList bytes.
+    posting_b64: String,
+}
+
+/// Merges a remote posting list shard into this node's inverted index.
+/// Gateway calls this on the successor node during rebalancing.
+async fn merge_shard_handler(
+    State(state): State<AppState>,
+    Json(body): Json<MergeShardBody>,
+) -> StatusCode {
+    use base64::Engine as _;
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&body.posting_b64) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let Ok(posting) = rmp_serde::from_slice(&bytes) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let _ = state.node.merge_posting_shard(&body.term, posting);
+    StatusCode::NO_CONTENT
 }
 
 #[derive(Deserialize)]

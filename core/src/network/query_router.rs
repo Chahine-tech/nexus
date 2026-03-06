@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+use tracing::instrument;
+
 use futures::future::join_all;
 
 use crate::crypto::identity::NodeKeypair;
@@ -62,6 +64,7 @@ impl QueryRouter {
     /// Routes a query: local BM25 for own shards, QUIC fanout for remote shards.
     ///
     /// Lock is acquired only to determine shard assignment, then released before any .await.
+    #[instrument(skip(self), fields(terms_count = terms.len(), limit, request_id))]
     pub async fn route_query(
         &self,
         terms: Vec<String>,

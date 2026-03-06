@@ -1,34 +1,48 @@
 import { Elysia, t } from "elysia"
+import { Effect } from "effect"
 import { registry } from "./services/NodeRegistry"
 import { planQuery } from "./services/QueryPlanner"
 import { reciprocalRankFusion } from "./services/MergeEngine"
+import { rebalanceNode } from "./services/RebalanceService"
+import { NodeTimeoutError, NodeDeadError, DeserializationError } from "./errors"
 import type { NodeId } from "./errors"
 import type { NodeResult } from "./proto"
+
+// Register rebalance hook once: when a node dies, transfer its shards.
+registry.onNodeDead((nodeId, url) => {
+  console.warn(`node ${nodeId} marked dead — starting rebalance`)
+  Effect.runPromise(rebalanceNode(nodeId, url, registry)).catch((e) =>
+    console.error("rebalance error:", e),
+  )
+})
+
+// Heartbeat loop: ping all nodes every 5 s, triggers onNodeDead callbacks.
+setInterval(() => {
+  registry.checkHeartbeats().catch((e) => console.error("heartbeat error:", e))
+}, 5_000)
 
 interface RawShardHit {
   doc_id: number
   score: number
 }
 
-type ParseResult<T> = { ok: true; value: T } | { ok: false }
-
-function parseShardResponse(raw: unknown): ParseResult<RawShardHit[]> {
-  if (!Array.isArray(raw)) return { ok: false }
-  const value: RawShardHit[] = []
-  for (const item of raw) {
-    if (typeof item !== "object" || item === null) return { ok: false }
-    const rec = item as Record<string, unknown>
-    const { doc_id, score } = rec
-    if (typeof doc_id !== "number" || typeof score !== "number") return { ok: false }
-    value.push({ doc_id, score })
-  }
-  return { ok: true, value }
-}
-
 interface NodeStats {
   doc_count: number
   vocab_size: number
   pagerank_ready: boolean
+}
+
+function parseShardResponse(raw: unknown): RawShardHit[] | null {
+  if (!Array.isArray(raw)) return null
+  const value: RawShardHit[] = []
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) return null
+    const rec = item as Record<string, unknown>
+    const { doc_id, score } = rec
+    if (typeof doc_id !== "number" || typeof score !== "number") return null
+    value.push({ doc_id, score })
+  }
+  return value
 }
 
 function parseNodeStats(raw: unknown): NodeStats | null {
@@ -44,27 +58,37 @@ function parseNodeStats(raw: unknown): NodeStats | null {
   return { doc_count, vocab_size, pagerank_ready }
 }
 
-async function fetchShard(
+// Fetches one shard as an Effect, yielding typed errors instead of throwing.
+function fetchShardEffect(
   url: string,
   terms: string[],
   limit: number,
   nodeId: NodeId,
   timeoutMs: number,
-): Promise<NodeResult[]> {
-  const q = encodeURIComponent(terms.join(" "))
-  const res = await fetch(`${url}/search?q=${q}&limit=${limit}`, {
-    signal: AbortSignal.timeout(timeoutMs),
+): Effect.Effect<NodeResult[], NodeTimeoutError | NodeDeadError | DeserializationError> {
+  return Effect.tryPromise({
+    try: async () => {
+      const q = encodeURIComponent(terms.join(" "))
+      const res = await fetch(`${url}/search?q=${q}&limit=${limit}`, {
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      if (!res.ok) throw new NodeDeadError({ nodeId })
+      const body = await res.arrayBuffer()
+      const parsed = parseShardResponse(JSON.parse(new TextDecoder().decode(body)))
+      if (parsed === null) {
+        throw new DeserializationError({ raw: new Uint8Array(body), cause: "unexpected shape" })
+      }
+      return parsed.map((r) => ({ id: String(r.doc_id), score: r.score }))
+    },
+    catch: (err) => {
+      if (err instanceof NodeDeadError || err instanceof DeserializationError) return err
+      // AbortSignal timeout fires as DOMException with name "TimeoutError"
+      if (err instanceof Error && err.name === "TimeoutError") {
+        return new NodeTimeoutError({ nodeId, terms })
+      }
+      return new NodeDeadError({ nodeId })
+    },
   })
-  if (!res.ok) {
-    registry.markDead(nodeId)
-    return []
-  }
-  const parsed = parseShardResponse(await res.json())
-  if (!parsed.ok) {
-    console.warn("unexpected response shape from shard", url)
-    return []
-  }
-  return parsed.value.map((r) => ({ id: String(r.doc_id), score: r.score }))
 }
 
 export const app = new Elysia()
@@ -96,20 +120,31 @@ export const app = new Elysia()
         return { results: [], error: "no live nodes registered" }
       }
 
-      const settled = await Promise.allSettled(
-        plan.shards.map(({ url, terms, nodeId }) =>
-          fetchShard(url, terms, limit, nodeId, plan.timeoutMs),
-        ),
+      // Record which terms each node owns (used for rebalancing on death).
+      for (const { nodeId, terms } of plan.shards) {
+        registry.recordTermOwnership(nodeId, terms)
+      }
+
+      // Fan-out to all shards concurrently; collect successes, log failures.
+      const program = Effect.forEach(
+        plan.shards,
+        ({ url, terms, nodeId }) =>
+          fetchShardEffect(url, terms, limit, nodeId, plan.timeoutMs).pipe(
+            Effect.tapError((e) =>
+              Effect.sync(() => {
+                if (e._tag === "NodeDeadError") registry.markDead(e.nodeId)
+                console.warn(`shard ${nodeId} failed:`, e._tag)
+              }),
+            ),
+            Effect.option,
+          ),
+        { concurrency: "unbounded" },
       )
 
-      const allNodeResults: NodeResult[][] = []
-      for (const result of settled) {
-        if (result.status === "fulfilled") {
-          allNodeResults.push(result.value)
-        } else {
-          console.warn("shard failed:", result.reason)
-        }
-      }
+      const options = await Effect.runPromise(program)
+      const allNodeResults = options.flatMap((opt) =>
+        opt._tag === "Some" ? [opt.value] : [],
+      )
 
       const merged = reciprocalRankFusion(allNodeResults)
       return { results: merged.slice(0, limit) }

@@ -1,25 +1,17 @@
+import { Data } from "effect"
+
 export type NodeId = string
 
-export class NodeTimeoutError extends Error {
-  readonly _tag = "NodeTimeoutError"
-  constructor(public nodeId: NodeId, public terms: string[]) {
-    super(`Node ${nodeId} timed out`)
-  }
-}
+export class NodeTimeoutError extends Data.TaggedError("NodeTimeoutError")<{
+  readonly nodeId: NodeId
+  readonly terms: string[]
+}> {}
 
-export class NodeDeadError extends Error {
-  readonly _tag = "NodeDeadError"
-  constructor(public nodeId: NodeId) {
-    super(`Node ${nodeId} is dead`)
-  }
-}
+export class NodeDeadError extends Data.TaggedError("NodeDeadError")<{
+  readonly nodeId: NodeId
+}> {}
 
-export class DeserializationError extends Error {
-  readonly _tag = "DeserializationError"
-  public raw: Uint8Array
-
-  constructor(raw: Uint8Array, cause: unknown) {
-    super("Failed to deserialize message", { cause })
-    this.raw = raw
-  }
-}
+export class DeserializationError extends Data.TaggedError("DeserializationError")<{
+  readonly raw: Uint8Array
+  readonly cause: unknown
+}> {}
