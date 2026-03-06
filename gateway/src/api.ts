@@ -6,6 +6,7 @@ import { reciprocalRankFusion } from "./services/MergeEngine"
 import { rebalanceNode } from "./services/RebalanceService"
 import { NodeTimeoutError, NodeDeadError, DeserializationError } from "./errors"
 import { expandQuery } from "./services/QueryExpander"
+import { ragPipeline } from "./services/RagPipeline"
 import type { NodeId } from "./errors"
 import type { NodeResult } from "./proto"
 
@@ -149,12 +150,18 @@ export const app = new Elysia()
       )
 
       const merged = reciprocalRankFusion(allNodeResults)
+      const top = merged.slice(0, limit)
+      const answer = query.rag === "true"
+        ? await Effect.runPromise(ragPipeline(q, top))
+        : undefined
+
       return {
-        results: merged.slice(0, limit),
+        results: top,
+        ...(answer ? { answer } : {}),
         ...(expanded !== q ? { expanded_query: expanded } : {}),
       }
     },
-    { query: t.Object({ q: t.Optional(t.String()), limit: t.Optional(t.String()) }) },
+    { query: t.Object({ q: t.Optional(t.String()), limit: t.Optional(t.String()), rag: t.Optional(t.String()) }) },
   )
 
   .post(

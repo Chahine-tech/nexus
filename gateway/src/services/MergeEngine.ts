@@ -3,6 +3,7 @@ import type { NodeResult } from "../proto"
 export interface RankedResult {
   id: string
   score: number
+  snippet?: string
 }
 
 export function reciprocalRankFusion(

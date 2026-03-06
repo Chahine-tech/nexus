@@ -19,3 +19,7 @@ export class DeserializationError extends Data.TaggedError("DeserializationError
 export class QueryExpansionError extends Data.TaggedError("QueryExpansionError")<{
   readonly cause: unknown
 }> {}
+
+export class RagPipelineError extends Data.TaggedError("RagPipelineError")<{
+  readonly cause: unknown
+}> {}
