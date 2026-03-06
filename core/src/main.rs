@@ -90,7 +90,11 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&keypair),
     ));
 
-    let gossip = Arc::new(GossipEngine::new(local_id.clone(), Arc::clone(&transport)));
+    let dp_epsilon: f64 = std::env::var("NEXUS_DP_EPSILON")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1.0);
+    let gossip = Arc::new(GossipEngine::new(local_id.clone(), Arc::clone(&transport), dp_epsilon));
     gossip.update_local(search_node.index.doc_count());
 
     // QUIC accept loop — dispatches incoming messages (gossip, queries) and updates routing table.

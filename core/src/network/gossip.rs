@@ -17,6 +17,8 @@ use crate::sketch::hyperloglog::HyperLogLog;
 pub enum GossipError {
     #[error("transport error: {0}")]
     Transport(#[from] TransportError),
+    #[error("invalid privacy parameter: {0}")]
+    InvalidEpsilon(#[from] crate::sketch::hyperloglog::HllError),
 }
 
 /// Snapshot of a node's local state, propagated via gossip.
@@ -55,10 +57,19 @@ pub struct GossipEngine {
     local_pagerank: Arc<RwLock<GossipPagerank>>,
     peer_pagerank: DashMap<NodeId, GossipPagerank>,
     transport: Arc<QuicTransport>,
+    /// Privacy budget for outbound HLL gossip (ε-DP, Laplace mechanism).
+    /// Smaller value → more noise → stronger privacy guarantee.
+    dp_epsilon: f64,
 }
 
 impl GossipEngine {
-    pub fn new(node_id: NodeId, transport: Arc<QuicTransport>) -> Self {
+    /// Creates a new gossip engine.
+    ///
+    /// `dp_epsilon` controls the Laplace noise added to HLL sketches before
+    /// broadcasting (ε-differential privacy). A typical value is `1.0`.
+    /// Must be positive.
+    pub fn new(node_id: NodeId, transport: Arc<QuicTransport>, dp_epsilon: f64) -> Self {
+        debug_assert!(dp_epsilon > 0.0, "dp_epsilon must be positive");
         let local_state =
             GossipState { node_id: node_id.clone(), doc_count: 0, timestamp: current_timestamp() };
         let empty_pr = GossipPagerank {
@@ -74,6 +85,7 @@ impl GossipEngine {
             local_pagerank: Arc::new(RwLock::new(empty_pr)),
             peer_pagerank: DashMap::new(),
             transport,
+            dp_epsilon,
         }
     }
 
@@ -188,12 +200,13 @@ impl GossipEngine {
             guard.node_id.clone()
         };
 
-        // Clone sketch while holding the lock, then release before any .await.
+        // Build a noisy copy of the local sketch (lock released before any .await).
         let idf_state = {
             let guard = self.local_idf.read().expect("local_idf RwLock poisoned");
+            let noisy = guard.noisy_clone(self.dp_epsilon, &mut rand::thread_rng())?;
             IdfGossipState {
                 node_id: local_node_id.clone(),
-                sketch: guard.clone(),
+                sketch: noisy,
                 timestamp: current_timestamp(),
             }
         };
@@ -352,7 +365,7 @@ mod tests {
                 rustls::crypto::ring::default_provider().install_default().ok();
                 QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &kp).await.unwrap()
             });
-            GossipEngine::new(node_id, Arc::new(transport))
+            GossipEngine::new(node_id, Arc::new(transport), 100.0)
         } else {
             // Fallback for sync test context — create a minimal runtime.
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -360,7 +373,7 @@ mod tests {
                 rustls::crypto::ring::default_provider().install_default().ok();
                 QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &kp).await.unwrap()
             });
-            GossipEngine::new(node_id, Arc::new(transport))
+            GossipEngine::new(node_id, Arc::new(transport), 100.0)
         }
     }
 

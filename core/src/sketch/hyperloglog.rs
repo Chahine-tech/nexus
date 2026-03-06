@@ -1,4 +1,11 @@
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum HllError {
+    #[error("epsilon must be positive, got {0}")]
+    InvalidEpsilon(f64),
+}
 
 // ---------------------------------------------------------------------------
 // HyperLogLog — cardinality estimation for distributed IDF
@@ -116,6 +123,32 @@ impl HyperLogLog {
             self.registers[i] = self.registers[i].max(other.registers[i]);
         }
     }
+
+    /// Returns a noisy copy of this sketch for privacy-preserving gossip.
+    ///
+    /// Adds independent Laplace(0, 1/epsilon) noise to each register, then
+    /// clamps to [0, 63]. Sensitivity = 1 because one `add()` call changes at
+    /// most one register by at most 1, so this satisfies ε-differential privacy.
+    ///
+    /// Smaller `epsilon` → more noise → stronger privacy, less accuracy.
+    ///
+    /// Returns `Err` if `epsilon <= 0.0`.
+    pub fn noisy_clone<R: rand::Rng>(&self, epsilon: f64, rng: &mut R) -> Result<Self, HllError> {
+        if epsilon <= 0.0 {
+            return Err(HllError::InvalidEpsilon(epsilon));
+        }
+        let scale = 1.0 / epsilon;
+        // Laplace(0, b) as difference of two Exp(1/b) samples (inverse-CDF method).
+        // Exp(rate) via inverse CDF: -ln(U) / rate where U ~ Uniform(0,1).
+        let mut noisy = self.clone();
+        for r in noisy.registers.iter_mut() {
+            let u1: f64 = rng.r#gen::<f64>().max(f64::MIN_POSITIVE);
+            let u2: f64 = rng.r#gen::<f64>().max(f64::MIN_POSITIVE);
+            let noise = scale * (u1.ln() - u2.ln()); // Laplace(0, scale)
+            *r = (*r as f64 + noise).round().clamp(0.0, 63.0) as u8;
+        }
+        Ok(noisy)
+    }
 }
 
 impl Default for HyperLogLog {
@@ -201,6 +234,50 @@ mod tests {
             (ab - ba).abs() < f64::EPSILON,
             "merge not commutative: ab={ab}, ba={ba}"
         );
+    }
+
+    #[test]
+    fn noisy_clone_zero_epsilon_returns_err() {
+        let hll = HyperLogLog::new();
+        assert!(hll.noisy_clone(0.0, &mut rand::thread_rng()).is_err());
+        assert!(hll.noisy_clone(-1.0, &mut rand::thread_rng()).is_err());
+    }
+
+    #[test]
+    fn noisy_clone_high_epsilon_close_to_original() {
+        let mut hll = HyperLogLog::new();
+        for i in 0u32..500 {
+            hll.add(&i.to_le_bytes());
+        }
+        let original_est = hll.estimate();
+        // Very high epsilon → tiny noise → estimate should stay within 20% of original.
+        let noisy = hll.noisy_clone(1000.0, &mut rand::thread_rng()).unwrap();
+        let noisy_est = noisy.estimate();
+        let error = ((noisy_est - original_est) / original_est).abs();
+        assert!(
+            error < 0.20,
+            "noisy estimate {noisy_est:.1} deviates more than 20% from {original_est:.1} (error={error:.3})"
+        );
+    }
+
+    #[test]
+    fn noisy_clone_low_epsilon_bounded() {
+        let mut hll = HyperLogLog::new();
+        for i in 0u32..200 {
+            hll.add(&i.to_le_bytes());
+        }
+        // Very low epsilon → lots of noise — registers must stay in [0, 63].
+        let noisy = hll.noisy_clone(0.01, &mut rand::thread_rng()).unwrap();
+        for &r in noisy.registers.iter() {
+            assert!(r <= 63, "register value {r} exceeds maximum of 63");
+        }
+    }
+
+    #[test]
+    fn noisy_clone_preserves_register_count() {
+        let hll = HyperLogLog::new();
+        let noisy = hll.noisy_clone(1.0, &mut rand::thread_rng()).unwrap();
+        assert_eq!(noisy.registers.len(), M);
     }
 
     #[test]
