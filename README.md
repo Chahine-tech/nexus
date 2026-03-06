@@ -1,6 +1,6 @@
 # Nexus
 
-Distributed search engine written in Rust + TypeScript.
+P2P search engine with no central coordinator — AST code indexing, hybrid BM25 + vector scoring, distributed PageRank via gossip. Written in Rust + TypeScript.
 
 ## Architecture
 
