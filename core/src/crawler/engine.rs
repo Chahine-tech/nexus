@@ -6,6 +6,7 @@ use tokio::sync::Semaphore;
 use url::Url;
 
 use crate::crawler::fetcher::{FetchError, Fetcher};
+use blake3;
 use crate::crawler::frontier::Frontier;
 use crate::crawler::robots::RobotsCache;
 use crate::node::Node;
@@ -31,11 +32,13 @@ pub struct CrawlerConfig {
     pub concurrency: usize,
     /// Maximum total pages to crawl (0 = unlimited).
     pub page_limit: u32,
+    /// Enable AST-based code indexing for Rust/TS/Python source files.
+    pub code_index: bool,
 }
 
 impl Default for CrawlerConfig {
     fn default() -> Self {
-        Self { max_depth: 3, concurrency: 8, page_limit: 10_000 }
+        Self { max_depth: 3, concurrency: 8, page_limit: 10_000, code_index: false }
     }
 }
 
@@ -48,6 +51,7 @@ pub struct Crawler {
     robots: Arc<RobotsCache>,
     node: Arc<Node>,
     semaphore: Arc<Semaphore>,
+    code_index: bool,
     config: CrawlerConfig,
     doc_id: AtomicU32,
 }
@@ -61,6 +65,7 @@ impl Crawler {
             robots: Arc::new(RobotsCache::new()),
             node,
             semaphore: Arc::new(Semaphore::new(config.concurrency)),
+            code_index: config.code_index,
             config,
             doc_id: AtomicU32::new(0),
         })
@@ -105,6 +110,7 @@ impl Crawler {
             let frontier = Arc::clone(&self.frontier);
             let robots = Arc::clone(&self.robots);
             let node = Arc::clone(&self.node);
+            let code_index = self.code_index;
             let doc_id = self.doc_id.fetch_add(1, Ordering::Relaxed);
 
             tokio::spawn(async move {
@@ -112,10 +118,35 @@ impl Crawler {
 
                 match fetcher.fetch(url.clone()).await {
                     Ok(page) => {
-                        tracing::debug!(%url, doc_id, "fetched page");
+                        tracing::debug!(
+                            fetched_url = %page.url, doc_id,
+                            visited = frontier.visited_count(),
+                            queued = frontier.queue_len(),
+                            "fetched page"
+                        );
 
                         // Index extracted text.
                         node.index_document(doc_id, &page.text);
+
+                        // Add links to local PageRank graph.
+                        for link in &page.links {
+                            // Use doc_id as src; link doc_id unknown — use hash of URL as proxy.
+                            let link_id = {
+                                let h = blake3::hash(link.as_str().as_bytes());
+                                // blake3 always returns 32 bytes — copy first 4 directly.
+                                let b = h.as_bytes();
+                                u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+                            };
+                            node.add_link(doc_id, link_id);
+                        }
+
+                        // AST code indexing (opt-in via CrawlerConfig::code_index).
+                        if code_index {
+                            let path = std::path::Path::new(url.path());
+                            if let Err(e) = node.index_code_file(doc_id, path, page.text.as_bytes()).await {
+                                tracing::debug!(%url, error = %e, "AST indexing skipped");
+                            }
+                        }
 
                         // Prefetch robots for new origins before enqueuing.
                         let mut new_links = Vec::new();

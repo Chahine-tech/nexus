@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::future::join_all;
 
+use crate::crypto::identity::NodeKeypair;
 use crate::crypto::reputation::ReputationStore;
 use crate::network::kademlia::RoutingTable;
 use crate::network::messages::{MessageType, NetworkMessage, NodeId, QueryRequest, QueryResponse, decode_message, encode_message};
@@ -43,6 +44,7 @@ pub struct QueryRouter {
     transport: Arc<QuicTransport>,
     local_id: NodeId,
     reputation: Arc<ReputationStore>,
+    keypair: Arc<NodeKeypair>,
 }
 
 impl QueryRouter {
@@ -52,8 +54,9 @@ impl QueryRouter {
         transport: Arc<QuicTransport>,
         local_id: NodeId,
         reputation: Arc<ReputationStore>,
+        keypair: Arc<NodeKeypair>,
     ) -> Self {
-        Self { node, table, transport, local_id, reputation }
+        Self { node, table, transport, local_id, reputation, keypair }
     }
 
     /// Routes a query: local BM25 for own shards, QUIC fanout for remote shards.
@@ -100,25 +103,29 @@ impl QueryRouter {
             (local_terms, remote_groups)
         }; // lock released
 
-        // Step 2: Local search.
+        // Step 2: Local search — hybrid (BM25 + vector) when vector index is ready.
         let local_results = if local_terms.is_empty() {
             vec![]
         } else {
-            self.node.search_terms(&local_terms, limit)
+            let query = local_terms.join(" ");
+            self.node.search_hybrid(&query, limit)
         };
 
-        // Step 3: Remote fanout (concurrent).
+        // Step 3: Remote fanout (concurrent) — skip peers below trust threshold.
         let futures: Vec<_> = remote_groups
             .into_iter()
+            .filter(|((_, peer_id), _)| self.reputation.is_trusted(peer_id))
             .map(|((addr, peer_id), terms)| {
                 let transport = Arc::clone(&self.transport);
                 let local_id = self.local_id.clone();
                 let reputation = Arc::clone(&self.reputation);
+                let keypair = Arc::clone(&self.keypair);
                 async move {
                     Self::query_remote_static(
                         &transport,
                         &local_id,
                         &reputation,
+                        &keypair,
                         RemoteQueryParams { addr, peer_id, terms, limit, request_id },
                     )
                     .await
@@ -142,6 +149,7 @@ impl QueryRouter {
         transport: &QuicTransport,
         local_id: &NodeId,
         reputation: &ReputationStore,
+        keypair: &NodeKeypair,
         params: RemoteQueryParams,
     ) -> Vec<(u32, f32)> {
         let addr = params.addr;
@@ -149,11 +157,12 @@ impl QueryRouter {
         let result: Result<Vec<(u32, f32)>, TransportError> = async {
             let qr = QueryRequest { terms: params.terms, limit: params.limit, request_id: params.request_id };
             let payload = encode_message(&qr).map_err(TransportError::Message)?;
+            let signature = keypair.sign(&payload);
             let msg = NetworkMessage {
                 kind: MessageType::QueryRequest,
                 payload,
                 sender: local_id.clone(),
-                signature: [0u8; 64],
+                signature,
             };
 
             let conn = transport.connect(addr).await?;
@@ -203,25 +212,16 @@ mod tests {
             crate::network::quic::QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &kp)
                 .await
                 .unwrap();
+        let keypair = Arc::new(kp);
 
-        QueryRouter::new(node, table, Arc::new(transport), local_id, reputation)
+        QueryRouter::new(node, table, Arc::new(transport), local_id, reputation, keypair)
     }
 
     #[test]
     fn reputation_arc_shared_with_caller() {
-        let local_id = NodeId([1u8; 32]);
-        let node = Arc::new(Node::new());
-        let table = Arc::new(Mutex::new(RoutingTable::new(local_id.clone())));
         let reputation = Arc::new(ReputationStore::new());
-
-        // We can't easily bind QUIC in a non-async test, so we verify the Arc
-        // is the same instance by checking that the caller's Arc and the one
-        // stored in QueryRouter point to the same allocation.
-        // We do this by keeping a second clone and checking ptr_eq.
         let reputation_clone = Arc::clone(&reputation);
-        // The test is that Arc::ptr_eq holds — done by keeping both alive.
         assert!(Arc::ptr_eq(&reputation, &reputation_clone));
-        drop((node, table, local_id, reputation_clone));
     }
 
     #[tokio::test]

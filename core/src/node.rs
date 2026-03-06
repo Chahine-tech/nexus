@@ -2,13 +2,15 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use crate::ast::features;
+use crate::ast::normalizer::tokens_from_features;
 use crate::ast::parser::{AstError, AstParser};
-use crate::indexer::inverted::InvertedIndex;
+use crate::indexer::inverted::{InvertedIndex, InvertedIndexError};
+use crate::indexer::posting::{PostingError, PostingList};
 use crate::indexer::tokenizer::Tokenizer;
 use crate::network::kademlia::RoutingTable;
 use crate::pagerank::local::LocalPageRank;
 use crate::scoring::bm25::Bm25Scorer;
-use crate::scoring::hybrid::hybrid_combine;
+use crate::scoring::hybrid::HybridScorer;
 use crate::scoring::vector::{VectorError, VectorIndex};
 
 /// Core search node — owns the index, scorers, and local PageRank graph.
@@ -16,9 +18,8 @@ pub struct Node {
     pub index: Arc<InvertedIndex>,
     tokenizer: Tokenizer,
     scorer: Bm25Scorer,
-    /// HNSW vector index. Wrapped in RwLock because Hnsw requires exclusive access
-    /// during insertion but allows concurrent reads during search.
-    vector: RwLock<Option<VectorIndex>>,
+    /// HNSW vector index. Wrapped in Arc+RwLock: Arc allows cheap cloning for HybridScorer.
+    vector: RwLock<Option<Arc<VectorIndex>>>,
     /// Weight of BM25 vs vector in hybrid search. Range [0.0, 1.0].
     hybrid_alpha: f32,
     pagerank: RwLock<LocalPageRank>,
@@ -77,6 +78,30 @@ impl Node {
         self.scorer.search(terms, limit)
     }
 
+    /// Returns the number of documents indexed for `term`, or 0 if absent.
+    ///
+    /// Used by shard-merge logic to decide whether to merge a remote posting list
+    /// into the local index. Returns an error only if internal serialization fails.
+    pub fn posting_df(&self, term: &str) -> Result<u64, InvertedIndexError> {
+        Ok(self.index.lookup(term).map(|pl| pl.len()).unwrap_or(0))
+    }
+
+    /// Merges a remote posting list shard for `term` into the local index.
+    ///
+    /// Used when a node receives a partial shard from a peer during rebalancing.
+    /// No-op if `remote` is empty.
+    pub fn merge_posting_shard(
+        &self,
+        term: &str,
+        remote: PostingList,
+    ) -> Result<(), PostingError> {
+        if remote.is_empty() {
+            return Ok(());
+        }
+        self.index.merge_posting(term, remote);
+        Ok(())
+    }
+
     /// Returns true if this node is the XOR-closest peer to `term`'s blake3 key.
     ///
     /// Returns true when the routing table is empty (single-node network owns all shards).
@@ -91,6 +116,12 @@ impl Node {
     // Vector index
     // -----------------------------------------------------------------------
 
+    /// Returns the vocabulary size of the current vector index, or 0 if not built.
+    pub fn vector_vocab_size(&self) -> usize {
+        let guard = self.vector.read().expect("vector RwLock poisoned");
+        guard.as_ref().map(|vi| vi.vocab_size()).unwrap_or(0)
+    }
+
     /// (Re-)builds the HNSW vector index from the current inverted index.
     ///
     /// Must be called after bulk indexing before `search_hybrid` returns vector results.
@@ -102,7 +133,7 @@ impl Node {
             let _ = vi.insert(doc_id);
         }
         let mut guard = self.vector.write().expect("vector RwLock poisoned");
-        *guard = Some(vi);
+        *guard = Some(Arc::new(vi));
         Ok(())
     }
 
@@ -113,19 +144,22 @@ impl Node {
         let terms = self.tokenizer.tokenize(query);
         let guard = self.vector.read().expect("vector RwLock poisoned");
 
-        let Some(vi) = guard.as_ref() else {
+        let Some(vi) = guard.as_ref().map(Arc::clone) else {
             drop(guard);
             return self.scorer.search(&terms, limit);
         };
-
-        let fetch = (limit * 4).max(20);
-        let bm25 = Bm25Scorer::with_defaults(Arc::clone(&self.index));
-        let bm25_hits = bm25.search(&terms, fetch);
-        let vec_hits = vi.search(&terms, fetch);
-        let alpha = self.hybrid_alpha;
         drop(guard);
 
-        hybrid_combine(bm25_hits, vec_hits, alpha, limit)
+        if self.hybrid_alpha == 0.5 {
+            HybridScorer::with_defaults(Arc::clone(&self.index), vi).search(&terms, limit)
+        } else {
+            HybridScorer::new(
+                Bm25Scorer::with_defaults(Arc::clone(&self.index)),
+                vi,
+                self.hybrid_alpha,
+            )
+            .search(&terms, limit)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -185,14 +219,7 @@ impl Node {
         .await
         .expect("spawn_blocking panicked")?;
 
-        let mut tokens: Vec<String> = Vec::new();
-        tokens.extend(code_features.function_names);
-        tokens.extend(code_features.type_names);
-        tokens.extend(code_features.imports);
-        for lit in code_features.literals {
-            tokens.extend(self.tokenizer.tokenize(&lit));
-        }
-
+        let tokens = tokens_from_features(&code_features);
         self.index.index_document(doc_id, &tokens);
         tracing::debug!(doc_id, tokens = tokens.len(), "indexed code file");
         Ok(())

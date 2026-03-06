@@ -13,7 +13,7 @@ use crate::scoring::vector::VectorIndex;
 /// combining, so that both signals are in the same [0, 1] range.
 pub struct HybridScorer {
     bm25: Bm25Scorer,
-    vector: VectorIndex,
+    vector: Arc<VectorIndex>,
     /// Weight for the BM25 signal. Vector weight = `1.0 - alpha`. Range [0.0, 1.0].
     alpha: f32,
 }
@@ -22,13 +22,13 @@ impl HybridScorer {
     /// Creates a new `HybridScorer`.
     ///
     /// `alpha = 1.0` → pure BM25. `alpha = 0.0` → pure vector. Default: `0.5`.
-    pub fn new(bm25: Bm25Scorer, vector: VectorIndex, alpha: f32) -> Self {
+    pub fn new(bm25: Bm25Scorer, vector: Arc<VectorIndex>, alpha: f32) -> Self {
         let alpha = alpha.clamp(0.0, 1.0);
         Self { bm25, vector, alpha }
     }
 
     /// Convenience constructor with default `alpha = 0.5`.
-    pub fn with_defaults(index: Arc<InvertedIndex>, vector: VectorIndex) -> Self {
+    pub fn with_defaults(index: Arc<InvertedIndex>, vector: Arc<VectorIndex>) -> Self {
         let bm25 = Bm25Scorer::with_defaults(index);
         Self::new(bm25, vector, 0.5)
     }
@@ -118,7 +118,7 @@ mod tests {
         }
 
         let bm25 = Bm25Scorer::with_defaults(Arc::clone(&idx));
-        Ok(HybridScorer::new(bm25, vi, alpha))
+        Ok(HybridScorer::new(bm25, Arc::new(vi), alpha))
     }
 
     #[test]
@@ -182,7 +182,7 @@ mod tests {
         }
         let bm25_for_check = Bm25Scorer::with_defaults(Arc::clone(&idx));
         let bm25_for_hybrid = Bm25Scorer::with_defaults(Arc::clone(&idx));
-        let hybrid = HybridScorer::new(bm25_for_hybrid, vi, 1.0);
+        let hybrid = HybridScorer::new(bm25_for_hybrid, Arc::new(vi), 1.0);
 
         let hybrid_results = hybrid.search(&["rust".to_string()], 10);
         let bm25_results = bm25_for_check.search(&["rust".to_string()], 10);

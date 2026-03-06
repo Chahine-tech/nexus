@@ -3,7 +3,7 @@ use std::sync::Arc;
 use criterion::{criterion_group, criterion_main, Criterion};
 use nexus_core::indexer::inverted::InvertedIndex;
 use nexus_core::indexer::tokenizer::Tokenizer;
-use nexus_core::scoring::bm25::{Bm25Params, Bm25Scorer};
+use nexus_core::scoring::bm25::Bm25Scorer;
 use nexus_core::scoring::hybrid::HybridScorer;
 use nexus_core::scoring::vector::VectorIndex;
 
@@ -168,7 +168,7 @@ fn bench_hybrid_search(c: &mut Criterion) {
         let _ = vi.insert(id);
     }
     let bm25 = Bm25Scorer::with_defaults(Arc::clone(&idx));
-    let scorer = HybridScorer::new(bm25, vi, 0.5);
+    let scorer = HybridScorer::new(bm25, Arc::new(vi), 0.5);
     let query = vec!["token_0".to_string(), "token_1".to_string()];
 
     c.bench_function("hybrid_search_1000_docs", |b| {

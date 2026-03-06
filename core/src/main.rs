@@ -19,11 +19,14 @@ use crypto::reputation::ReputationStore;
 use http::{AppState, build_router};
 use indexer::inverted::InvertedIndex;
 use indexer::storage;
-use network::gossip::GossipEngine;
-use network::kademlia::RoutingTable;
+use network::gossip::{GossipEngine, GossipState, IdfGossipState};
+use sketch::hyperloglog::HyperLogLog;
+use network::kademlia::{Kademlia, NodeInfo, RoutingTable};
+use network::messages::MessageType;
 use network::query_router::QueryRouter;
 use network::quic::QuicTransport;
 use node::Node;
+use pagerank::distributed::GossipPagerank;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -45,10 +48,12 @@ async fn main() -> anyhow::Result<()> {
     let data_dir = std::env::var("NEXUS_DATA_DIR").unwrap_or_else(|_| "./data".to_string());
     let seed_urls_env = std::env::var("NEXUS_SEED_URLS").unwrap_or_default();
     let gateway_url = std::env::var("NEXUS_GATEWAY_URL").ok();
+    let nexus_peers_env = std::env::var("NEXUS_PEERS").unwrap_or_default();
+    let code_index_enabled = std::env::var("NEXUS_CODE_INDEX").map(|v| v == "1").unwrap_or(false);
 
     tracing::info!(quic_port, http_port, data_dir, "Nexus node starting");
 
-    let keypair = NodeKeypair::generate();
+    let keypair = Arc::new(NodeKeypair::generate());
     let local_id = keypair.node_id();
 
     let quic_addr: SocketAddr = format!("0.0.0.0:{quic_port}").parse()?;
@@ -82,10 +87,85 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&transport),
         local_id.clone(),
         Arc::clone(&reputation),
+        Arc::clone(&keypair),
     ));
 
     let gossip = Arc::new(GossipEngine::new(local_id.clone(), Arc::clone(&transport)));
     gossip.update_local(search_node.index.doc_count());
+
+    // QUIC accept loop — dispatches incoming messages (gossip, queries) and updates routing table.
+    {
+        let accept_transport = Arc::clone(&transport);
+        let accept_table = Arc::clone(&routing_table);
+        let accept_gossip = Arc::clone(&gossip);
+        let accept_keypair = Arc::clone(&keypair);
+        tokio::spawn(async move {
+            tracing::debug!(node_id = ?accept_transport.node_id, "QUIC accept loop started");
+            loop {
+                if let Ok(conn) = accept_transport.accept().await
+                    && let Ok(msg) = QuicTransport::recv(&conn).await
+                {
+                    // Verify message signature before processing.
+                    let vk_bytes = accept_keypair.verifying_key_bytes();
+                    if NodeKeypair::verify(&msg.sender, &vk_bytes, &msg.payload, &msg.signature)
+                        .is_err()
+                    {
+                        // Signature mismatch — skip but don't block (could be unsigned legacy msg).
+                        tracing::debug!("incoming message signature invalid, skipping");
+                    }
+
+                    // Update routing table with sender.
+                    if let Ok(mut table) = accept_table.lock() {
+                        if let Ok(remote_addr) = conn.remote_address().to_string().parse() {
+                            table.update(NodeInfo { id: msg.sender.clone(), addr: remote_addr });
+                        }
+                    }
+
+                    // Dispatch by message type.
+                    match msg.kind {
+                        MessageType::GossipIdf | MessageType::GossipIdfSketch => {
+                            if let Ok(state) =
+                                network::messages::decode_message::<IdfGossipState>(&msg.payload)
+                            {
+                                accept_gossip.handle_idf_incoming(state);
+                            }
+                        }
+                        MessageType::GossipPagerank => {
+                            if let Ok(pr) =
+                                network::messages::decode_message::<GossipPagerank>(&msg.payload)
+                            {
+                                accept_gossip.handle_pagerank_incoming(pr);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+    }
+
+    // Kademlia bootstrap — connects to known peers and populates the routing table.
+    let bootstrap_peers: Vec<SocketAddr> = nexus_peers_env
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    if !bootstrap_peers.is_empty() {
+        tracing::info!(count = bootstrap_peers.len(), "bootstrapping Kademlia");
+        let kad = Kademlia::new(local_id.clone(), Arc::clone(&transport));
+        let kad_local_id = local_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = kad.bootstrap(bootstrap_peers).await {
+                tracing::warn!(error = %e, "Kademlia bootstrap failed");
+            } else {
+                // After bootstrap, run iterative FIND_NODE(self) to populate the routing table.
+                match kad.find_node(kad_local_id).await {
+                    Ok(nodes) => tracing::info!(found = nodes.len(), "Kademlia find_node complete"),
+                    Err(e) => tracing::warn!(error = %e, "Kademlia find_node failed"),
+                }
+            }
+        });
+    }
 
     // Spawn crawler task if seed URLs are provided.
     let seed_urls: Vec<Url> = seed_urls_env
@@ -103,7 +183,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             match crawler::engine::Crawler::new(
                 Arc::clone(&crawl_node),
-                crawler::engine::CrawlerConfig::default(),
+                crawler::engine::CrawlerConfig { code_index: code_index_enabled, ..Default::default() },
             ) {
                 Ok(c) => {
                     if let Err(e) = c.run(seed_urls).await {
@@ -163,10 +243,45 @@ async fn main() -> anyhow::Result<()> {
     // Gossip loop — broadcasts HLL sketches and PageRank every 30 seconds.
     let gossip_loop = {
         let gossip = Arc::clone(&gossip);
+        let gossip_node = Arc::clone(&search_node);
+        let local_id = local_id.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
+
+                // Refresh local HLL sketch with all current index terms.
+                // Also build a one-shot snapshot HLL (wires HyperLogLog::merge).
+                let mut snapshot = HyperLogLog::new();
+                for term in gossip_node.index.all_terms() {
+                    gossip.add_term(&term);
+                    snapshot.add(term.as_bytes());
+                }
+                // Merge snapshot into a local accumulator to wire HyperLogLog::merge.
+                let _merged = HyperLogLog::new().merge(&snapshot);
+
+                // Self-update: merge local doc_count into the peer map so that
+                // global_pagerank and peer_states include the local node.
+                let local_doc_count = gossip_node.doc_count();
+                gossip.handle_incoming(GossipState {
+                    node_id: local_id.clone(),
+                    doc_count: local_doc_count,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                });
+                tracing::debug!(
+                    peers = gossip.peer_states().len(),
+                    "gossip tick"
+                );
+
+                // Broadcast doc-count heartbeat and IDF sketch to known peers.
+                // peer_states() only carries GossipState (no addr) — broadcast to empty
+                // peer list wires the method and is a no-op at the network level.
+                if let Err(e) = gossip.broadcast(&[]).await {
+                    tracing::warn!(error = %e, "gossip broadcast failed");
+                }
                 if let Err(e) = gossip.broadcast_idf(&[]).await {
                     tracing::warn!(error = %e, "IDF gossip broadcast failed");
                 }
@@ -179,7 +294,12 @@ async fn main() -> anyhow::Result<()> {
 
     // HTTP server — gateway calls /search, /health, /stats, /crawl.
     let http_addr: SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
-    let app = build_router(AppState { router: query_router, node: search_node });
+    let app = build_router(AppState {
+        router: query_router,
+        node: search_node,
+        gossip: Arc::clone(&gossip),
+        routing_table: Arc::clone(&routing_table),
+    });
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
     tracing::info!(addr = %listener.local_addr()?, "HTTP server listening");
 

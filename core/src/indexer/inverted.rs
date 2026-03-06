@@ -101,6 +101,16 @@ impl InvertedIndex {
         self.total_token_sum.load(Ordering::Relaxed) as f32 / count as f32
     }
 
+    /// Merges a remote `PostingList` shard for `term` into the local index.
+    ///
+    /// If the term already exists, TF values are summed. Used for shard rebalancing.
+    pub fn merge_posting(&self, term: &str, remote: PostingList) {
+        self.postings
+            .entry(term.to_string())
+            .and_modify(|local| local.merge(&remote))
+            .or_insert(remote);
+    }
+
     pub fn vocabulary_size(&self) -> usize {
         self.postings.len()
     }
