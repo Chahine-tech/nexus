@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use nexus_core::indexer::posting::PostingList;
 use nexus_core::indexer::inverted::InvertedIndex;
 use nexus_core::indexer::tokenizer::Tokenizer;
 use nexus_core::scoring::bm25::Bm25Scorer;
@@ -178,6 +179,43 @@ fn bench_hybrid_search(c: &mut Criterion) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// BP128 serde benchmarks
+// ---------------------------------------------------------------------------
+
+/// Builds a dense posting list with consecutive doc IDs and varying TF values.
+fn synthetic_posting_list(n: usize) -> PostingList {
+    let mut pl = PostingList::new();
+    for i in 0..n as u32 {
+        pl.insert(i, (i % 10) + 1);
+    }
+    pl
+}
+
+fn bench_bp128_serde(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bp128_serde");
+
+    for &n in &[1_000usize, 10_000, 100_000] {
+        let pl = synthetic_posting_list(n);
+        let bytes = rmp_serde::to_vec(&pl).expect("serialize");
+
+        // Report compressed size once (visible in bench output).
+        eprintln!("n={n}  compressed_bytes={}", bytes.len());
+
+        group.bench_with_input(BenchmarkId::new("encode", n), &pl, |b, pl| {
+            b.iter(|| rmp_serde::to_vec(std::hint::black_box(pl)).unwrap());
+        });
+
+        group.bench_with_input(BenchmarkId::new("decode", n), &bytes, |b, bytes| {
+            b.iter(|| {
+                rmp_serde::from_slice::<PostingList>(std::hint::black_box(bytes)).unwrap()
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_index_document,
@@ -189,5 +227,6 @@ criterion_group!(
     bench_hnsw_build,
     bench_hnsw_search,
     bench_hybrid_search,
+    bench_bp128_serde,
 );
 criterion_main!(benches);

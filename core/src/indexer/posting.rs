@@ -1,3 +1,4 @@
+use bitpacking::{BitPacker, BitPacker4x};
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -83,32 +84,160 @@ impl Default for PostingList {
 }
 
 // ---------------------------------------------------------------------------
-// Serialization — delta-encoded TF entries + native RoaringBitmap bytes
+// BP128 helpers
+// ---------------------------------------------------------------------------
+
+/// Compresses a slice of u32 values using BitPacker4x (SIMD BP128).
+///
+/// Wire layout per block of 128 integers:
+///   - 1 byte: num_bits (minimum bits needed for the block's max value)
+///   - num_bits * 16 bytes: compressed block data
+///
+/// Partial tail blocks (len % 128 != 0) are zero-padded to 128 before
+/// compression; the caller stores `count` separately to know how many values
+/// to read back from the tail block.
+fn compress_stream(values: &[u32]) -> Vec<u8> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+
+    let packer = BitPacker4x::new();
+    let tail_len = values.len() % BitPacker4x::BLOCK_LEN;
+    let num_blocks = values.len().div_ceil(BitPacker4x::BLOCK_LEN);
+
+    let mut out = Vec::with_capacity(num_blocks * (1 + BitPacker4x::BLOCK_LEN * 4));
+
+    // Full blocks — chunks_exact guarantees exactly BLOCK_LEN elements per chunk.
+    let chunks = values.chunks_exact(BitPacker4x::BLOCK_LEN);
+    let tail = chunks.remainder();
+
+    for chunk in chunks {
+        let block: &[u32; BitPacker4x::BLOCK_LEN] = chunk.try_into().unwrap_or_else(|_| unreachable!());
+        let num_bits = packer.num_bits(block);
+        let compressed_len = (num_bits as usize) * BitPacker4x::BLOCK_LEN / 8;
+        out.push(num_bits);
+        if num_bits > 0 {
+            let start = out.len();
+            out.resize(start + compressed_len, 0u8);
+            packer.compress(block, &mut out[start..], num_bits);
+        }
+    }
+
+    // Tail block — zero-pad to BLOCK_LEN.
+    if tail_len > 0 {
+        let mut padded = [0u32; BitPacker4x::BLOCK_LEN];
+        padded[..tail_len].copy_from_slice(tail);
+        let num_bits = packer.num_bits(&padded);
+        let compressed_len = (num_bits as usize) * BitPacker4x::BLOCK_LEN / 8;
+        out.push(num_bits);
+        if num_bits > 0 {
+            let start = out.len();
+            out.resize(start + compressed_len, 0u8);
+            packer.compress(&padded, &mut out[start..], num_bits);
+        }
+    }
+
+    out
+}
+
+/// Decompresses a BP128-encoded byte stream back into `count` u32 values.
+fn decompress_stream(bytes: &[u8], count: usize) -> Result<Vec<u32>, String> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let packer = BitPacker4x::new();
+    let num_full_blocks = count / BitPacker4x::BLOCK_LEN;
+    let tail_len = count % BitPacker4x::BLOCK_LEN;
+
+    let mut result = Vec::with_capacity(count);
+    let mut cursor = 0usize;
+
+    // Full blocks.
+    for _ in 0..num_full_blocks {
+        if cursor >= bytes.len() {
+            return Err(format!("unexpected end of compressed stream at cursor={cursor}"));
+        }
+        let num_bits = bytes[cursor];
+        cursor += 1;
+        let compressed_len = (num_bits as usize) * BitPacker4x::BLOCK_LEN / 8;
+        let mut block = [0u32; BitPacker4x::BLOCK_LEN];
+        if num_bits > 0 {
+            if cursor + compressed_len > bytes.len() {
+                return Err(format!(
+                    "compressed block overflows buffer: cursor={cursor}, len={compressed_len}"
+                ));
+            }
+            packer.decompress(&bytes[cursor..cursor + compressed_len], &mut block, num_bits);
+        }
+        result.extend_from_slice(&block);
+        cursor += compressed_len;
+    }
+
+    // Tail block.
+    if tail_len > 0 {
+        if cursor >= bytes.len() {
+            return Err("unexpected end of stream before tail block".to_string());
+        }
+        let num_bits = bytes[cursor];
+        cursor += 1;
+        let compressed_len = (num_bits as usize) * BitPacker4x::BLOCK_LEN / 8;
+        let mut block = [0u32; BitPacker4x::BLOCK_LEN];
+        if num_bits > 0 {
+            if cursor + compressed_len > bytes.len() {
+                return Err("tail block overflows buffer".to_string());
+            }
+            packer.decompress(&bytes[cursor..cursor + compressed_len], &mut block, num_bits);
+        }
+        result.extend_from_slice(&block[..tail_len]);
+        cursor += compressed_len;
+    }
+
+    debug_assert_eq!(cursor, bytes.len(), "all compressed bytes consumed");
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// Serialization — BP128-compressed streams + native RoaringBitmap bytes
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize)]
 struct PostingListWire {
+    /// RoaringBitmap serialized in its native format.
     bitmap_bytes: Vec<u8>,
-    /// Delta-encoded: entry[0] = raw doc_id, entry[i] = doc_id[i] - doc_id[i-1].
-    tf_deltas: Vec<(u32, u32)>,
+    /// Total number of (doc_id, tf) pairs encoded in the streams below.
+    count: u32,
+    /// BP128-compressed stream of doc_id deltas:
+    ///   delta[0] = doc_id[0], delta[i] = doc_id[i] - doc_id[i-1].
+    doc_id_bytes: Vec<u8>,
+    /// BP128-compressed stream of TF values (parallel to doc_id_bytes).
+    tf_bytes: Vec<u8>,
 }
 
 impl Serialize for PostingList {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::Error;
+
         let mut bitmap_bytes = Vec::new();
         self.doc_ids
             .serialize_into(&mut bitmap_bytes)
             .map_err(|e| S::Error::custom(e.to_string()))?;
 
-        let mut tf_deltas = Vec::with_capacity(self.tf_entries.len());
+        let count = self.tf_entries.len() as u32;
+
+        let mut doc_id_deltas = Vec::with_capacity(self.tf_entries.len());
+        let mut tfs = Vec::with_capacity(self.tf_entries.len());
         let mut prev = 0u32;
         for &(doc_id, tf) in &self.tf_entries {
-            tf_deltas.push((doc_id - prev, tf));
+            doc_id_deltas.push(doc_id - prev);
             prev = doc_id;
+            tfs.push(tf);
         }
 
-        PostingListWire { bitmap_bytes, tf_deltas }.serialize(serializer)
+        let doc_id_bytes = compress_stream(&doc_id_deltas);
+        let tf_bytes = compress_stream(&tfs);
+
+        PostingListWire { bitmap_bytes, count, doc_id_bytes, tf_bytes }.serialize(serializer)
     }
 }
 
@@ -120,9 +249,14 @@ impl<'de> Deserialize<'de> for PostingList {
         let doc_ids = RoaringBitmap::deserialize_from(wire.bitmap_bytes.as_slice())
             .map_err(|e| D::Error::custom(e.to_string()))?;
 
-        let mut tf_entries = Vec::with_capacity(wire.tf_deltas.len());
+        let n = wire.count as usize;
+        let doc_id_deltas =
+            decompress_stream(&wire.doc_id_bytes, n).map_err(D::Error::custom)?;
+        let tfs = decompress_stream(&wire.tf_bytes, n).map_err(D::Error::custom)?;
+
+        let mut tf_entries = Vec::with_capacity(n);
         let mut prev = 0u32;
-        for (delta, tf) in wire.tf_deltas {
+        for (delta, tf) in doc_id_deltas.into_iter().zip(tfs) {
             let doc_id = prev + delta;
             tf_entries.push((doc_id, tf));
             prev = doc_id;
@@ -181,20 +315,67 @@ mod tests {
         assert_eq!(a.tf(3), 4);
     }
 
+    fn roundtrip(pl: &PostingList) -> PostingList {
+        let bytes = rmp_serde::to_vec(pl).expect("serialize");
+        rmp_serde::from_slice(&bytes).expect("deserialize")
+    }
+
     #[test]
     fn test_serde_roundtrip() {
+        // 5 entries — exercises tail-only path (< 128).
         let mut pl = PostingList::new();
         for i in [10u32, 20, 30, 100, 500] {
             pl.insert(i, i / 10);
         }
 
-        let bytes = rmp_serde::to_vec(&pl).expect("serialize");
-        let restored: PostingList = rmp_serde::from_slice(&bytes).expect("deserialize");
+        let restored = roundtrip(&pl);
 
         assert_eq!(restored.len(), pl.len());
         for i in [10u32, 20, 30, 100, 500] {
             assert_eq!(restored.tf(i), pl.tf(i));
             assert!(restored.doc_ids().contains(i));
         }
+    }
+
+    #[test]
+    fn test_serde_roundtrip_full_block() {
+        // 128 entries — exactly one full block, no tail.
+        let mut pl = PostingList::new();
+        for i in 0u32..128 {
+            pl.insert(i * 10, (i % 10) + 1);
+        }
+
+        let restored = roundtrip(&pl);
+
+        assert_eq!(restored.len(), 128);
+        for i in 0u32..128 {
+            assert_eq!(restored.tf(i * 10), (i % 10) + 1);
+            assert!(restored.doc_ids().contains(i * 10));
+        }
+    }
+
+    #[test]
+    fn test_serde_roundtrip_full_plus_tail() {
+        // 130 entries — one full block + tail of 2.
+        let mut pl = PostingList::new();
+        for i in 0u32..130 {
+            pl.insert(i * 7, (i % 5) + 1);
+        }
+
+        let restored = roundtrip(&pl);
+
+        assert_eq!(restored.len(), 130);
+        for i in 0u32..130 {
+            assert_eq!(restored.tf(i * 7), (i % 5) + 1);
+            assert!(restored.doc_ids().contains(i * 7));
+        }
+    }
+
+    #[test]
+    fn test_serde_empty() {
+        let pl = PostingList::new();
+        let restored = roundtrip(&pl);
+        assert_eq!(restored.len(), 0);
+        assert!(restored.is_empty());
     }
 }

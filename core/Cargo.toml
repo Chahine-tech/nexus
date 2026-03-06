@@ -19,6 +19,7 @@ rmp-serde = "1"
 
 # Index
 roaring = "0.11"
+bitpacking = { version = "0.9", features = ["bitpacker4x"], default-features = false }
 dashmap = "6"
 blake3 = "=1.8.3"
 
