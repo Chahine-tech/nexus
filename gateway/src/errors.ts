@@ -15,3 +15,7 @@ export class DeserializationError extends Data.TaggedError("DeserializationError
   readonly raw: Uint8Array
   readonly cause: unknown
 }> {}
+
+export class QueryExpansionError extends Data.TaggedError("QueryExpansionError")<{
+  readonly cause: unknown
+}> {}

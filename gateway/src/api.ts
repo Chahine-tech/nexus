@@ -5,6 +5,7 @@ import { planQuery } from "./services/QueryPlanner"
 import { reciprocalRankFusion } from "./services/MergeEngine"
 import { rebalanceNode } from "./services/RebalanceService"
 import { NodeTimeoutError, NodeDeadError, DeserializationError } from "./errors"
+import { expandQuery } from "./services/QueryExpander"
 import type { NodeId } from "./errors"
 import type { NodeResult } from "./proto"
 
@@ -114,7 +115,8 @@ export const app = new Elysia()
         return { results: [] }
       }
 
-      const plan = planQuery(q)
+      const expanded = await Effect.runPromise(expandQuery(q))
+      const plan = planQuery(expanded)
 
       if (plan.shards.length === 0) {
         return { results: [], error: "no live nodes registered" }
@@ -147,7 +149,10 @@ export const app = new Elysia()
       )
 
       const merged = reciprocalRankFusion(allNodeResults)
-      return { results: merged.slice(0, limit) }
+      return {
+        results: merged.slice(0, limit),
+        ...(expanded !== q ? { expanded_query: expanded } : {}),
+      }
     },
     { query: t.Object({ q: t.Optional(t.String()), limit: t.Optional(t.String()) }) },
   )

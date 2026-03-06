@@ -13,6 +13,7 @@
     "dev": "bun --watch index.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
     "@elysiajs/websocket": "^0.2.8",
     "@nexus/proto": "workspace:*",
     "effect": "^3.19.19",
