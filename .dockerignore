@@ -1,0 +1,16 @@
+# Rust build artifacts
+target/
+
+# Node/Bun
+node_modules/
+gateway/node_modules/
+proto/node_modules/
+
+# Git
+.git/
+.github/
+
+# Dev / editor
+.env
+*.env
+.DS_Store
