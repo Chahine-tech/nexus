@@ -5,8 +5,9 @@ import { planQuery } from "./services/QueryPlanner"
 import { reciprocalRankFusion } from "./services/MergeEngine"
 import { rebalanceNode } from "./services/RebalanceService"
 import { NodeTimeoutError, NodeDeadError, DeserializationError } from "./errors"
+import Anthropic from "@anthropic-ai/sdk"
 import { expandQuery } from "./services/QueryExpander"
-import { ragPipeline } from "./services/RagPipeline"
+import { ragPipeline, RAG_PROMPT } from "./services/RagPipeline"
 import type { NodeId } from "./errors"
 import type { NodeResult } from "./proto"
 
@@ -208,4 +209,86 @@ export const app = new Elysia()
     }
 
     return { total_docs, total_vocab, pagerank_ready, live_nodes: nodes.length }
+  })
+
+  .ws("/search/stream", {
+    open(ws) {
+      ws.send(JSON.stringify({ type: "connected" }))
+    },
+    async message(ws, raw) {
+      const msg = typeof raw === "string" ? JSON.parse(raw) : (raw as Record<string, unknown>)
+      const q: string = (msg.q as string) ?? ""
+      const useRag: boolean = msg.rag === true
+      const limit = Math.min((msg.limit as number) ?? 10, 100)
+
+      if (!q.trim()) {
+        ws.send(JSON.stringify({ type: "done" }))
+        return
+      }
+
+      const expanded = await Effect.runPromise(expandQuery(q))
+      const plan = planQuery(expanded)
+
+      if (plan.shards.length === 0) {
+        ws.send(JSON.stringify({ type: "error", message: "no live nodes registered" }))
+        ws.send(JSON.stringify({ type: "done" }))
+        return
+      }
+
+      for (const { nodeId, terms } of plan.shards) {
+        registry.recordTermOwnership(nodeId, terms)
+      }
+
+      const program = Effect.forEach(
+        plan.shards,
+        ({ url, terms, nodeId }) =>
+          fetchShardEffect(url, terms, limit, nodeId, plan.timeoutMs).pipe(
+            Effect.tapError((e) =>
+              Effect.sync(() => {
+                if (e._tag === "NodeDeadError") registry.markDead(e.nodeId)
+              }),
+            ),
+            Effect.option,
+          ),
+        { concurrency: "unbounded" },
+      )
+
+      const options = await Effect.runPromise(program)
+      const allNodeResults = options.flatMap((opt) =>
+        opt._tag === "Some" ? [opt.value] : [],
+      )
+
+      const merged = reciprocalRankFusion(allNodeResults).slice(0, limit)
+
+      for (const result of merged) {
+        ws.send(JSON.stringify({ type: "result", data: result }))
+      }
+
+      if (useRag) {
+        const apiKey = process.env.ANTHROPIC_API_KEY
+        const snippets = merged.slice(0, 5).filter((r) => r.snippet).map((r) => r.snippet!)
+        if (apiKey && snippets.length > 0) {
+          try {
+            const client = new Anthropic({ apiKey })
+            const stream = client.messages.stream({
+              model: "claude-haiku-4-5-20251001",
+              max_tokens: 256,
+              messages: [{ role: "user", content: RAG_PROMPT(q, snippets) }],
+            })
+            for await (const event of stream) {
+              if (
+                event.type === "content_block_delta" &&
+                event.delta.type === "text_delta"
+              ) {
+                ws.send(JSON.stringify({ type: "answer_chunk", text: event.delta.text }))
+              }
+            }
+          } catch {
+            // streaming errors are non-fatal
+          }
+        }
+      }
+
+      ws.send(JSON.stringify({ type: "done" }))
+    },
   })

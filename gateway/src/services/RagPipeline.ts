@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk"
 import { Effect } from "effect"
 import type { RankedResult } from "./MergeEngine"
 
-const PROMPT = (query: string, snippets: string[]) =>
+export const RAG_PROMPT = (query: string, snippets: string[]) =>
   `You are a code search assistant for a distributed AST search engine. Results are extracted AST features: function signatures, type definitions, docstrings, and code patterns from source files. Write a concise answer (3-5 sentences) that directly addresses the query. Reference specific functions, types, or patterns from the results. Be precise and technical.
 
 Query: ${query}
@@ -28,7 +28,7 @@ export function ragPipeline(
       const msg = await client.messages.create({
         model: "claude-haiku-4-5-20251001",
         max_tokens: 256,
-        messages: [{ role: "user", content: PROMPT(query, snippets) }],
+        messages: [{ role: "user", content: RAG_PROMPT(query, snippets) }],
       })
       return (msg.content[0] as { text: string }).text.trim()
     },
