@@ -157,8 +157,11 @@ impl Node {
         drop(guard);
 
         if self.hybrid_alpha == 0.5 {
-            HybridScorer::with_defaults(Arc::clone(&self.index), vi).search(&terms, limit)
+            // No explicit alpha configured — let QPP predict the optimal blend.
+            HybridScorer::with_defaults(Arc::clone(&self.index), vi)
+                .search_adaptive(query, &terms, limit)
         } else {
+            // Explicit alpha set via NEXUS_HYBRID_ALPHA — honour it.
             HybridScorer::new(
                 Bm25Scorer::with_defaults(Arc::clone(&self.index)),
                 vi,
