@@ -124,10 +124,10 @@ impl Crawler {
                                 new_links.push(link);
                             } else {
                                 // Attempt to fetch robots for unknown origin (fail-open).
-                                if let Some(robots_url) = RobotsCache::robots_url(&link) {
-                                    if let Ok(resp) = fetcher.fetch(robots_url).await {
-                                        robots.insert(&link, &resp.text);
-                                    }
+                                if let Some(robots_url) = RobotsCache::robots_url(&link)
+                                    && let Ok(resp) = fetcher.fetch(robots_url).await
+                                {
+                                    robots.insert(&link, &resp.text);
                                 }
                                 if robots.is_allowed(&link) {
                                     new_links.push(link);

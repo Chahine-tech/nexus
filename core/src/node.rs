@@ -1,5 +1,8 @@
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use crate::ast::features;
+use crate::ast::parser::{AstError, AstParser};
 use crate::indexer::inverted::InvertedIndex;
 use crate::indexer::tokenizer::Tokenizer;
 use crate::network::kademlia::RoutingTable;
@@ -24,6 +27,11 @@ pub struct Node {
 impl Node {
     pub fn new() -> Self {
         let index = Arc::new(InvertedIndex::new());
+        Self::from_index(index)
+    }
+
+    /// Creates a node from an already-built inverted index (e.g. loaded from disk).
+    pub fn from_index(index: Arc<InvertedIndex>) -> Self {
         let tokenizer = Tokenizer::new();
         let scorer = Bm25Scorer::with_defaults(Arc::clone(&index));
         Self {
@@ -34,6 +42,21 @@ impl Node {
             hybrid_alpha: 0.5,
             pagerank: RwLock::new(LocalPageRank::new()),
         }
+    }
+
+    /// Total number of indexed documents.
+    pub fn doc_count(&self) -> u64 {
+        self.index.doc_count()
+    }
+
+    /// Number of unique terms in the vocabulary.
+    pub fn vocab_size(&self) -> usize {
+        self.index.vocabulary_size()
+    }
+
+    /// Returns `true` if PageRank has been computed at least once.
+    pub fn pagerank_ready(&self) -> bool {
+        !self.pagerank.read().expect("pagerank RwLock poisoned").ranked().is_empty()
     }
 
     /// Tokenizes `text` and indexes it under `doc_id`.
@@ -133,10 +156,80 @@ impl Node {
     pub fn pagerank_snapshot(&self) -> std::collections::HashMap<u32, f32> {
         self.pagerank.read().expect("pagerank RwLock poisoned").scores_snapshot()
     }
+
+    // -----------------------------------------------------------------------
+    // Code-file indexing (AST pipeline)
+    // -----------------------------------------------------------------------
+
+    /// Indexes a source file using the AST pipeline.
+    ///
+    /// Detects language from `path` extension, parses with tree-sitter in a
+    /// blocking thread (because `AstParser` is `!Send`), then indexes the
+    /// extracted function names, type names, imports, and tokenized literals.
+    ///
+    /// Returns `AstError::UnsupportedLanguage` for non-Rust/TS/Python files.
+    pub async fn index_code_file(
+        &self,
+        doc_id: u32,
+        path: &Path,
+        source: &[u8],
+    ) -> Result<(), AstError> {
+        let language = AstParser::detect_language(path)?;
+        let source_vec = source.to_vec();
+
+        let code_features = tokio::task::spawn_blocking(move || {
+            let parser = AstParser::new()?;
+            let ast = parser.parse(language, &source_vec)?;
+            features::extract(&ast)
+        })
+        .await
+        .expect("spawn_blocking panicked")?;
+
+        let mut tokens: Vec<String> = Vec::new();
+        tokens.extend(code_features.function_names);
+        tokens.extend(code_features.type_names);
+        tokens.extend(code_features.imports);
+        for lit in code_features.literals {
+            tokens.extend(self.tokenizer.tokenize(&lit));
+        }
+
+        self.index.index_document(doc_id, &tokens);
+        tracing::debug!(doc_id, tokens = tokens.len(), "indexed code file");
+        Ok(())
+    }
 }
 
 impl Default for Node {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_index_preserves_data() {
+        let index = Arc::new(InvertedIndex::new());
+        let tokenizer = Tokenizer::new();
+        for i in 0..5u32 {
+            let text = format!("document {i} about rust systems programming");
+            index.index_document(i, &tokenizer.tokenize(&text));
+        }
+        let node = Node::from_index(Arc::clone(&index));
+        assert_eq!(node.doc_count(), 5);
+        assert!(node.vocab_size() > 0);
+    }
+
+    #[tokio::test]
+    async fn index_code_file_rust() {
+        let node = Node::new();
+        let src = b"fn greet(name: &str) -> String { format!(\"Hello {name}\") }";
+        node.index_code_file(0, Path::new("greet.rs"), src)
+            .await
+            .expect("index code file");
+        let results = node.search("greet", 5);
+        assert!(!results.is_empty(), "should find doc 0 by function name");
     }
 }

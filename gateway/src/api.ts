@@ -25,6 +25,25 @@ function parseShardResponse(raw: unknown): ParseResult<RawShardHit[]> {
   return { ok: true, value }
 }
 
+interface NodeStats {
+  doc_count: number
+  vocab_size: number
+  pagerank_ready: boolean
+}
+
+function parseNodeStats(raw: unknown): NodeStats | null {
+  if (typeof raw !== "object" || raw === null) return null
+  const rec = raw as Record<string, unknown>
+  const { doc_count, vocab_size, pagerank_ready } = rec
+  if (
+    typeof doc_count !== "number" ||
+    typeof vocab_size !== "number" ||
+    typeof pagerank_ready !== "boolean"
+  )
+    return null
+  return { doc_count, vocab_size, pagerank_ready }
+}
+
 async function fetchShard(
   url: string,
   terms: string[],
@@ -97,3 +116,49 @@ export const app = new Elysia()
     },
     { query: t.Object({ q: t.Optional(t.String()), limit: t.Optional(t.String()) }) },
   )
+
+  .post(
+    "/crawl",
+    async ({ body }) => {
+      const nodes = registry.liveNodes()
+      const results = await Promise.allSettled(
+        nodes.map(({ url }) =>
+          fetch(`${url}/crawl`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ seeds: body.seeds }),
+            signal: AbortSignal.timeout(5_000),
+          }),
+        ),
+      )
+      const triggered = results.filter((r) => r.status === "fulfilled").length
+      return { triggered, total: nodes.length }
+    },
+    { body: t.Object({ seeds: t.Array(t.String()) }) },
+  )
+
+  .get("/stats", async () => {
+    const nodes = registry.liveNodes()
+    const results = await Promise.allSettled(
+      nodes.map(({ url }) =>
+        fetch(`${url}/stats`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.json()),
+      ),
+    )
+
+    let total_docs = 0
+    let total_vocab = 0
+    let pagerank_ready = false
+
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        const stats = parseNodeStats(r.value)
+        if (stats !== null) {
+          total_docs += stats.doc_count
+          total_vocab += stats.vocab_size
+          pagerank_ready = pagerank_ready || stats.pagerank_ready
+        }
+      }
+    }
+
+    return { total_docs, total_vocab, pagerank_ready, live_nodes: nodes.length }
+  })

@@ -35,7 +35,7 @@ pub fn split_identifier(ident: &str) -> Vec<String> {
 pub fn normalize_signature(sig: &str) -> Vec<String> {
     sig.split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|s| !s.is_empty())
-        .flat_map(|token| split_identifier(token))
+        .flat_map(split_identifier)
         .filter(|t| t.len() >= 2)
         .collect()
 }

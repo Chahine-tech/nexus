@@ -61,8 +61,8 @@ impl RoutingTable {
     /// XOR distance between two node IDs.
     pub fn xor_distance(a: &NodeId, b: &NodeId) -> [u8; 32] {
         let mut dist = [0u8; 32];
-        for i in 0..32 {
-            dist[i] = a.0[i] ^ b.0[i];
+        for (i, byte) in dist.iter_mut().enumerate() {
+            *byte = a.0[i] ^ b.0[i];
         }
         dist
     }
@@ -190,15 +190,15 @@ impl Kademlia {
         let mut results = Vec::new();
 
         for node in closest {
-            if let Ok(conn) = self.transport.connect(node.addr).await {
-                if let Ok(nodes) = self.find_node_rpc(&conn, target.clone()).await {
-                    for n in nodes {
-                        if seen.insert(n.id.0) {
-                            if let Ok(mut table) = self.table.lock() {
-                                table.update(n.clone());
-                            }
-                            results.push(n);
+            if let Ok(conn) = self.transport.connect(node.addr).await
+                && let Ok(nodes) = self.find_node_rpc(&conn, target.clone()).await
+            {
+                for n in nodes {
+                    if seen.insert(n.id.0) {
+                        if let Ok(mut table) = self.table.lock() {
+                            table.update(n.clone());
                         }
+                        results.push(n);
                     }
                 }
             }

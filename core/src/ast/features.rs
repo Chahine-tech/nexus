@@ -151,12 +151,12 @@ pub fn extract(ast: &ParsedAst) -> Result<CodeFeatures, AstError> {
     let tree = parser.parse(&ast.source, None).ok_or(AstError::ParseFailed)?;
 
     let src = &ast.source;
-    let mut features = CodeFeatures::default();
-
-    features.function_names = run_query(fq, &tree, src);
-    features.type_names = run_query(tq, &tree, src);
-    features.imports = run_query(iq, &tree, src);
-    features.literals = run_query(sq, &tree, src);
+    let features = CodeFeatures {
+        function_names: run_query(fq, &tree, src),
+        type_names: run_query(tq, &tree, src),
+        imports: run_query(iq, &tree, src),
+        literals: run_query(sq, &tree, src),
+    };
 
     Ok(features)
 }

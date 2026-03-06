@@ -142,13 +142,13 @@ impl VectorIndex {
         }
 
         for (term, &qtf_val) in &qtf {
-            if let Some(&dim_idx) = self.vocab.get(*term) {
-                if let Some(idf) = self.index.with_posting(term, |pl| {
+            if let Some(&dim_idx) = self.vocab.get(*term)
+                && let Some(idf) = self.index.with_posting(term, |pl| {
                     let df = pl.len() as f32;
                     ((n - df + 0.5) / (df + 0.5) + 1.0).ln()
-                }) {
-                    vec[dim_idx] = qtf_val * idf;
-                }
+                })
+            {
+                vec[dim_idx] = qtf_val * idf;
             }
         }
 

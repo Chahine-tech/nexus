@@ -71,7 +71,7 @@ impl InvertedIndex {
     where
         F: FnOnce(&PostingList) -> R,
     {
-        self.postings.get(term).map(|entry| f(&*entry))
+        self.postings.get(term).map(|entry| f(&entry))
     }
 
     /// Returns a clone of the posting list for `term`.

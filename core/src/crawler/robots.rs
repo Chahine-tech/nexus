@@ -70,12 +70,12 @@ fn parse_disallowed(content: &str) -> Vec<String> {
         if let Some(agent) = line.strip_prefix("User-agent:") {
             let agent = agent.trim().to_lowercase();
             in_relevant_block = agent == "*" || agent == "nexusbot";
-        } else if in_relevant_block {
-            if let Some(path) = line.strip_prefix("Disallow:") {
-                let path = path.trim();
-                if !path.is_empty() {
-                    disallowed.push(path.to_string());
-                }
+        } else if in_relevant_block
+            && let Some(path) = line.strip_prefix("Disallow:")
+        {
+            let path = path.trim();
+            if !path.is_empty() {
+                disallowed.push(path.to_string());
             }
         }
     }
