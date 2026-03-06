@@ -24,7 +24,7 @@ impl Default for Bm25Params {
 
 /// BM25 scorer backed by a shared `InvertedIndex`.
 pub struct Bm25Scorer {
-    index: Arc<InvertedIndex>,
+    pub(crate) index: Arc<InvertedIndex>,
     params: Bm25Params,
 }
 

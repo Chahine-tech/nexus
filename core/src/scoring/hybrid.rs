@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::indexer::inverted::InvertedIndex;
 use crate::scoring::bm25::Bm25Scorer;
+use crate::scoring::query_features::QueryFeatures;
 use crate::scoring::vector::VectorIndex;
 
 /// Combines BM25 keyword scoring with approximate nearest-neighbour vector scoring.
@@ -42,6 +43,23 @@ impl HybridScorer {
         let bm25_hits = self.bm25.search(terms, fetch);
         let vec_hits = self.vector.search(terms, fetch);
         hybrid_combine(bm25_hits, vec_hits, self.alpha, limit)
+    }
+
+    /// Like `search()` but infers alpha from query features (QPP-based fusion).
+    ///
+    /// Extracts 6 features from the query (length, IDF stats, code token presence,
+    /// stop word ratio, token entropy) and applies logistic regression to predict
+    /// the optimal BM25/vector blend for this specific query type.
+    ///
+    /// `raw_query` is the original unprocessed string. `terms` is post-tokenization.
+    pub fn search_adaptive(&self, raw_query: &str, terms: &[String], limit: usize) -> Vec<(u32, f32)> {
+        let features = QueryFeatures::extract(raw_query, terms, &self.bm25.index);
+        let alpha = features.predict_alpha();
+        tracing::debug!(alpha, query = raw_query, "adaptive alpha predicted");
+        let fetch = (limit * 4).max(20);
+        let bm25_hits = self.bm25.search(terms, fetch);
+        let vec_hits = self.vector.search(terms, fetch);
+        hybrid_combine(bm25_hits, vec_hits, alpha, limit)
     }
 }
 
@@ -161,6 +179,52 @@ mod tests {
         let scorer = build_scorer(0.0).expect("build scorer");
         let results = scorer.search(&["rust".to_string()], 5);
         assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_search_adaptive_returns_results() {
+        let scorer = build_scorer(0.5).expect("build scorer");
+        let terms = vec!["rust".to_string()];
+        let results = scorer.search_adaptive("rust", &terms, 5);
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_adaptive_alpha_differs_by_query_type() {
+        let idx = Arc::new(InvertedIndex::new());
+        let docs: &[&[&str]] = &[
+            &["tokio", "spawn", "async", "rust"],
+            &["how", "to", "handle", "errors", "gracefully"],
+            &["hashmap", "btreemap", "collections"],
+        ];
+        for (i, tokens) in docs.iter().enumerate() {
+            let owned: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
+            idx.index_document(i as u32, &owned);
+        }
+        let vi = VectorIndex::new(Arc::clone(&idx)).expect("build vi");
+        for i in 0..3u32 { let _ = vi.insert(i); }
+        let bm25 = Bm25Scorer::with_defaults(Arc::clone(&idx));
+        let scorer = HybridScorer::new(bm25, Arc::new(vi), 0.5);
+
+        let code_features = crate::scoring::query_features::QueryFeatures::extract(
+            "tokio_spawn", &["tokio".to_string(), "spawn".to_string()], &idx,
+        );
+        let natural_features = crate::scoring::query_features::QueryFeatures::extract(
+            "how to handle errors gracefully",
+            &["how".to_string(), "handle".to_string(), "errors".to_string(), "gracefully".to_string()],
+            &idx,
+        );
+
+        let alpha_code = code_features.predict_alpha();
+        let alpha_natural = natural_features.predict_alpha();
+        assert!(
+            alpha_code > alpha_natural,
+            "code query alpha ({alpha_code:.3}) should exceed natural language alpha ({alpha_natural:.3})"
+        );
+
+        // Both search_adaptive calls should complete without error.
+        let _ = scorer.search_adaptive("tokio_spawn", &["tokio".to_string(), "spawn".to_string()], 3);
+        let _ = scorer.search_adaptive("how to handle errors", &["handle".to_string(), "errors".to_string()], 3);
     }
 
     #[test]
