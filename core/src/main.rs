@@ -251,7 +251,7 @@ async fn main() -> anyhow::Result<()> {
                         "crawl complete, rebuilding vector index"
                     );
 
-                    if let Err(e) = crawl_node.rebuild_vector_index() {
+                    if let Err(e) = crawl_node.rebuild_vector_index().await {
                         tracing::warn!(error = %e, "vector index rebuild failed");
                     }
 

@@ -111,7 +111,7 @@ impl QueryRouter {
             vec![]
         } else {
             let query = local_terms.join(" ");
-            self.node.search_hybrid(&query, limit)
+            self.node.search_hybrid(&query, limit).await
         };
 
         // Step 3: Remote fanout (concurrent) — skip peers below trust threshold.

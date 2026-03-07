@@ -45,7 +45,7 @@ impl HybridScorer {
     pub fn search(&self, terms: &[String], limit: usize) -> Vec<(u32, f32)> {
         let fetch = (limit * 4).max(20);
         let bm25_hits = self.bm25.search(terms, fetch);
-        let vec_hits = self.vector.search(terms, fetch);
+        let vec_hits = self.vector.search(&terms.join(" "), fetch);
         hybrid_combine(bm25_hits, vec_hits, self.alpha, limit)
     }
 
@@ -65,7 +65,7 @@ impl HybridScorer {
         tracing::debug!(alpha, query = raw_query, "adaptive alpha predicted");
         let fetch = (limit * 4).max(20);
         let bm25_hits = self.bm25.search(terms, fetch);
-        let vec_hits = self.vector.search(terms, fetch);
+        let vec_hits = self.vector.search(raw_query, fetch);
         hybrid_combine(bm25_hits, vec_hits, alpha, limit)
     }
 }
@@ -121,100 +121,75 @@ pub fn hybrid_combine(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scoring::vector::VectorError;
 
-    fn build_scorer(alpha: f32) -> Result<HybridScorer, VectorError> {
-        let idx = Arc::new(InvertedIndex::new());
-        let docs: &[&[&str]] = &[
-            &["rust", "fast", "safe", "rust"],
-            &["python", "dynamic", "easy"],
-            &["rust", "performance", "systems"],
-            &["java", "safe", "verbose"],
-        ];
-        for (i, tokens) in docs.iter().enumerate() {
-            let owned: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
-            idx.index_document(i as u32, &owned);
-        }
+    // Tests that exercise VectorIndex require the fastembed model (~130 MB download).
+    // They are marked #[ignore]. Run with:
+    //   cargo test -p nexus-core scoring::hybrid -- --include-ignored
 
-        let vi = VectorIndex::new(Arc::clone(&idx))?;
-        // Insert all docs into HNSW.
-        for i in 0..4u32 {
-            let _ = vi.insert(i); // doc 1 and 3 may have terms in vocab — ignore NoTermsInVocab
-        }
+    // -----------------------------------------------------------------------
+    // hybrid_combine — pure function, no fastembed dependency, always runs
+    // -----------------------------------------------------------------------
 
-        let bm25 = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
-        Ok(HybridScorer::new(bm25, Arc::new(vi), alpha))
+    #[test]
+    fn test_hybrid_combine_empty_inputs() {
+        let result = hybrid_combine(vec![], vec![], 0.5, 10);
+        assert!(result.is_empty());
     }
 
     #[test]
-    fn test_hybrid_returns_nonempty_results() {
-        let scorer = build_scorer(0.5).expect("build scorer");
-        let results = scorer.search(&["rust".to_string()], 5);
-        assert!(!results.is_empty());
+    fn test_hybrid_combine_bm25_only() {
+        let bm25_hits = vec![(0u32, 2.0), (1u32, 1.0)];
+        let result = hybrid_combine(bm25_hits, vec![], 1.0, 10);
+        // alpha=1.0: pure BM25. BM25 min-max normalized — doc 0 scores highest.
+        assert_eq!(result[0].0, 0);
+        assert!(result[0].1 > result[1].1);
     }
 
     #[test]
-    fn test_limit_respected() {
-        let scorer = build_scorer(0.5).expect("build scorer");
-        let results = scorer.search(&["rust".to_string(), "fast".to_string()], 2);
-        assert!(results.len() <= 2);
+    fn test_hybrid_combine_vector_only() {
+        let vec_hits = vec![(0u32, 0.9), (1u32, 0.5)];
+        let result = hybrid_combine(vec![], vec_hits, 0.0, 10);
+        // alpha=0.0: pure vector. Doc 0 has highest cosine sim.
+        assert_eq!(result[0].0, 0);
     }
 
     #[test]
-    fn test_empty_terms_returns_empty() {
-        let scorer = build_scorer(0.5).expect("build scorer");
-        assert!(scorer.search(&[], 10).is_empty());
+    fn test_hybrid_combine_limit_respected() {
+        let bm25_hits = vec![(0u32, 3.0), (1u32, 2.0), (2u32, 1.0)];
+        let result = hybrid_combine(bm25_hits, vec![], 1.0, 2);
+        assert!(result.len() <= 2);
     }
 
     #[test]
-    fn test_scores_sorted_descending() {
-        let scorer = build_scorer(0.5).expect("build scorer");
-        let results = scorer.search(&["rust".to_string()], 10);
-        for window in results.windows(2) {
-            assert!(
-                window[0].1 >= window[1].1,
-                "scores not sorted: {} < {}",
-                window[0].1,
-                window[1].1
-            );
+    fn test_hybrid_combine_sorted_descending() {
+        let bm25_hits = vec![(0u32, 1.0), (1u32, 3.0), (2u32, 2.0)];
+        let result = hybrid_combine(bm25_hits, vec![], 1.0, 10);
+        for window in result.windows(2) {
+            assert!(window[0].1 >= window[1].1);
         }
     }
 
-    #[test]
-    fn test_alpha_zero_uses_only_vector() {
-        // With alpha=0.0, BM25 has no influence. Results still non-empty if vector hits exist.
-        let scorer = build_scorer(0.0).expect("build scorer");
-        let results = scorer.search(&["rust".to_string()], 5);
-        assert!(!results.is_empty());
-    }
-
-    #[test]
-    fn test_search_adaptive_returns_results() {
-        let scorer = build_scorer(0.5).expect("build scorer");
-        let terms = vec!["rust".to_string()];
-        let results = scorer.search_adaptive("rust", &terms, 5);
-        assert!(!results.is_empty());
-    }
+    // -----------------------------------------------------------------------
+    // QPP alpha prediction — no fastembed dependency, always runs
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_adaptive_alpha_differs_by_query_type() {
         let idx = Arc::new(InvertedIndex::new());
         let docs: &[&[&str]] = &[
             &["tokio", "spawn", "async", "rust"],
-            &["how", "to", "handle", "errors", "gracefully"],
+            &["how", "handle", "errors", "gracefully"],
             &["hashmap", "btreemap", "collections"],
         ];
         for (i, tokens) in docs.iter().enumerate() {
             let owned: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
             idx.index_document(i as u32, &owned);
         }
-        let vi = VectorIndex::new(Arc::clone(&idx)).expect("build vi");
-        for i in 0..3u32 { let _ = vi.insert(i); }
-        let bm25 = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
-        let scorer = HybridScorer::new(bm25, Arc::new(vi), 0.5);
 
         let code_features = crate::scoring::query_features::QueryFeatures::extract(
-            "tokio_spawn", &["tokio".to_string(), "spawn".to_string()], &idx,
+            "tokio_spawn",
+            &["tokio".to_string(), "spawn".to_string()],
+            &idx,
         );
         let natural_features = crate::scoring::query_features::QueryFeatures::extract(
             "how to handle errors gracefully",
@@ -228,16 +203,40 @@ mod tests {
             alpha_code > alpha_natural,
             "code query alpha ({alpha_code:.3}) should exceed natural language alpha ({alpha_natural:.3})"
         );
+    }
 
-        // Both search_adaptive calls should complete without error.
-        let _ = scorer.search_adaptive("tokio_spawn", &["tokio".to_string(), "spawn".to_string()], 3);
-        let _ = scorer.search_adaptive("how to handle errors", &["handle".to_string(), "errors".to_string()], 3);
+    // -----------------------------------------------------------------------
+    // Full HybridScorer tests — require fastembed model download
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[ignore = "requires fastembed model download (~130 MB)"]
+    fn test_hybrid_returns_nonempty_results() {
+        let idx = Arc::new(InvertedIndex::new());
+        let docs: &[&[&str]] = &[
+            &["rust", "fast", "safe", "rust"],
+            &["python", "dynamic", "easy"],
+            &["rust", "performance", "systems"],
+        ];
+        for (i, tokens) in docs.iter().enumerate() {
+            let owned: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
+            idx.index_document(i as u32, &owned);
+        }
+        let vi = VectorIndex::new().expect("build vi");
+        vi.insert(0, "rust fast safe").expect("insert 0");
+        vi.insert(1, "python dynamic easy").expect("insert 1");
+        vi.insert(2, "rust performance systems").expect("insert 2");
+        let bm25 = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
+        let scorer = HybridScorer::new(bm25, Arc::new(vi), 0.5);
+
+        let results = scorer.search(&["rust".to_string()], 5);
+        assert!(!results.is_empty());
     }
 
     #[test]
+    #[ignore = "requires fastembed model download (~130 MB)"]
     fn test_alpha_one_matches_bm25_order() {
-        // With alpha=1.0 and an empty vector index (no ANN candidates), hybrid
-        // reduces to pure BM25 — the candidate set and scores are identical.
+        // alpha=1.0 + empty HNSW → no vector hits → hybrid == pure BM25
         let idx = Arc::new(InvertedIndex::new());
         let docs: &[&[&str]] = &[
             &["rust", "rust", "rust", "fast"],
@@ -248,23 +247,18 @@ mod tests {
             let owned: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
             idx.index_document(i as u32, &owned);
         }
-        // Vector index built from same vocabulary but no docs inserted — no ANN candidates,
-        // so hybrid candidate set == BM25 candidate set.
-        let vi = VectorIndex::new(Arc::clone(&idx)).expect("build vi");
-        // Intentionally no vi.insert() calls — empty ANN graph.
-
+        let vi = Arc::new(VectorIndex::new().expect("build vi"));
+        // No inserts — empty HNSW produces no vector hits.
         let name_idx = Arc::new(InvertedIndex::new());
-        let bm25_for_check = Bm25Scorer::with_fields(Arc::clone(&name_idx), Arc::clone(&idx));
-        let bm25_for_hybrid = Bm25Scorer::with_fields(Arc::clone(&name_idx), Arc::clone(&idx));
-        let hybrid = HybridScorer::new(bm25_for_hybrid, Arc::new(vi), 1.0);
+        let bm25_check = Bm25Scorer::with_fields(Arc::clone(&name_idx), Arc::clone(&idx));
+        let bm25_hybrid = Bm25Scorer::with_fields(Arc::clone(&name_idx), Arc::clone(&idx));
+        let hybrid = HybridScorer::new(bm25_hybrid, vi, 1.0);
 
-        let hybrid_results = hybrid.search(&["rust".to_string()], 10);
-        let bm25_results = bm25_for_check.search(&["rust".to_string()], 10);
+        let hybrid_ids: Vec<u32> =
+            hybrid.search(&["rust".to_string()], 10).iter().map(|(id, _)| *id).collect();
+        let bm25_ids: Vec<u32> =
+            bm25_check.search(&["rust".to_string()], 10).iter().map(|(id, _)| *id).collect();
 
-        let hybrid_ids: Vec<u32> = hybrid_results.iter().map(|(id, _)| *id).collect();
-        let bm25_ids: Vec<u32> = bm25_results.iter().map(|(id, _)| *id).collect();
-
-        // Same candidate set + alpha=1.0 → identical top result.
         assert_eq!(hybrid_ids.first(), bm25_ids.first());
     }
 }

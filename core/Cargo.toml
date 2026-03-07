@@ -31,8 +31,8 @@ tree-sitter-typescript = "0.23"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"
 
-half = "2"
 hnsw_rs = "0.3"
+fastembed = "5"
 
 quinn = "=0.11.9"
 rustls = { version = "=0.23.37", features = ["ring"] }
@@ -63,4 +63,9 @@ criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "indexer"
+harness = false
+
+# Requires fastembed model (~130 MB). Run with: NEXUS_BENCH_VECTOR=1 cargo bench --bench hybrid
+[[bench]]
+name = "hybrid"
 harness = false

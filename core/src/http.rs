@@ -53,6 +53,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/stats", get(stats_handler))
         .route("/crawl", post(crawl_handler))
         .route("/index", post(index_handler))
+        .route("/rebuild-vector", post(rebuild_vector_handler))
         .route("/export-shard", get(export_shard_handler))
         .route("/merge-shard", post(merge_shard_handler))
         .with_state(state)
@@ -115,8 +116,8 @@ struct StatsResponse {
     doc_count: u64,
     vocab_size: usize,
     pagerank_ready: bool,
-    /// Vocabulary size of the HNSW vector index (0 if not built yet).
-    vector_vocab_size: usize,
+    /// Embedding dimension of the HNSW vector index (0 if not built yet).
+    vector_dim: usize,
     /// Top-5 documents by local PageRank score.
     top_pagerank: Vec<(u32, f32)>,
     /// Estimated global distinct-term cardinality from merged HyperLogLog sketches.
@@ -155,7 +156,7 @@ async fn stats_handler(State(state): State<AppState>) -> Json<StatsResponse> {
         doc_count: state.node.doc_count(),
         vocab_size: state.node.vocab_size(),
         pagerank_ready: state.node.pagerank_ready(),
-        vector_vocab_size: state.node.vector_vocab_size(),
+        vector_dim: state.node.vector_dim(),
         top_pagerank,
         estimated_global_terms,
         peer_count,
@@ -249,6 +250,23 @@ async fn index_handler(
     state.gossip.update_local(state.node.doc_count());
     state.node.update_global_doc_count(state.gossip.global_doc_count());
     StatusCode::OK
+}
+
+/// Triggers a full vector index rebuild from all currently indexed documents.
+///
+/// Blocks until the rebuild is complete (fastembed batch embed + HNSW insert).
+/// Returns 200 OK with the number of documents embedded.
+async fn rebuild_vector_handler(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    match state.node.rebuild_vector_index().await {
+        Ok(()) => {
+            let doc_count = state.node.doc_count();
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "docs_embedded": doc_count })))
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        ),
+    }
 }
 
 #[derive(Deserialize)]

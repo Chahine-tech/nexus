@@ -36,6 +36,8 @@ pub struct Node {
     url_index: DashMap<String, u32>,
     /// doc_id → URL reverse mapping for O(1) lookup at search time.
     doc_index: DashMap<u32, String>,
+    /// doc_id → body text for fastembed re-embedding during vector index rebuild.
+    doc_text: DashMap<u32, String>,
     /// Shared handle into `scorer.global_n` — updated from gossip.
     global_n: Arc<AtomicU64>,
 }
@@ -67,6 +69,7 @@ impl Node {
             pagerank: RwLock::new(LocalPageRank::new()),
             url_index: DashMap::new(),
             doc_index: DashMap::new(),
+            doc_text: DashMap::new(),
             global_n,
         }
     }
@@ -124,6 +127,9 @@ impl Node {
         all_tokens.extend_from_slice(&body_tokens);
         self.index.index_document(doc_id, &all_tokens);
 
+        // Store body text for fastembed re-embedding during vector index rebuild.
+        self.doc_text.insert(doc_id, format!("{name} {body}"));
+
         tracing::debug!(doc_id, url, name_tokens = name_tokens.len(), body_tokens = body_tokens.len(), "indexed document (fielded)");
         doc_id
     }
@@ -143,6 +149,7 @@ impl Node {
         self.index.index_document(doc_id, &tokens);
         // Also index into body field so scorer has candidates.
         self.body_index.index_document(doc_id, &tokens);
+        self.doc_text.insert(doc_id, text.to_string());
         tracing::debug!(doc_id, url, tokens = tokens.len(), "indexed document");
         doc_id
     }
@@ -160,6 +167,7 @@ impl Node {
         let tokens = self.tokenizer.tokenize(text);
         self.index.index_document(doc_id, &tokens);
         self.body_index.index_document(doc_id, &tokens);
+        self.doc_text.insert(doc_id, text.to_string());
         tracing::debug!(doc_id, tokens = tokens.len(), "indexed document");
     }
 
@@ -213,56 +221,91 @@ impl Node {
     // Vector index
     // -----------------------------------------------------------------------
 
-    /// Returns the vocabulary size of the current vector index, or 0 if not built.
-    pub fn vector_vocab_size(&self) -> usize {
+    /// Returns the embedding dimension of the vector index (384 when built, 0 otherwise).
+    pub fn vector_dim(&self) -> usize {
         let guard = self.vector.read().expect("vector RwLock poisoned");
-        guard.as_ref().map(|vi| vi.vocab_size()).unwrap_or(0)
+        if guard.is_some() { crate::scoring::vector::EMBEDDING_DIM } else { 0 }
     }
 
-    /// (Re-)builds the HNSW vector index from the body field index.
+    /// (Re-)builds the HNSW vector index using fastembed dense embeddings.
     ///
-    /// Uses `body_index` for vocabulary (richer term distribution than `name_index`).
+    /// Collects all indexed body texts, embeds them in batches via BAAI/bge-small-en-v1.5,
+    /// and inserts the resulting 384-dim vectors into a fresh HNSW graph.
+    ///
+    /// Blocking operations (model init + ONNX inference) run on the blocking thread pool.
     /// Must be called after bulk indexing before `search_hybrid` returns vector results.
     #[instrument(skip(self))]
-    pub fn rebuild_vector_index(&self) -> Result<(), VectorError> {
-        let vi = VectorIndex::new(Arc::clone(&self.body_index))?;
-        let doc_ids = self.body_index.all_doc_ids();
-        for doc_id in doc_ids {
-            // Ignore NoTermsInVocab — the doc may have been indexed after the vocab snapshot.
-            let _ = vi.insert(doc_id);
-        }
-        let mut guard = self.vector.write().expect("vector RwLock poisoned");
-        *guard = Some(Arc::new(vi));
+    pub async fn rebuild_vector_index(&self) -> Result<(), VectorError> {
+        // Phase 1: initialize model (blocking — may download weights on first call).
+        let vi = tokio::task::spawn_blocking(VectorIndex::new)
+            .await
+            .expect("spawn_blocking panicked")?;
+
+        // Collect (doc_id, text) pairs from the in-memory store.
+        let doc_texts: Vec<(u32, String)> = self
+            .body_index
+            .all_doc_ids()
+            .into_iter()
+            .filter_map(|id| self.doc_text.get(&id).map(|t| (id, t.clone())))
+            .collect();
+
+        // Phase 2: batch embed + insert (blocking — CPU-bound ONNX inference).
+        let vi = Arc::new(vi);
+        let vi_clone = Arc::clone(&vi);
+        tokio::task::spawn_blocking(move || {
+            let pairs: Vec<(u32, &str)> =
+                doc_texts.iter().map(|(id, t)| (*id, t.as_str())).collect();
+            vi_clone.batch_insert(&pairs)
+        })
+        .await
+        .expect("spawn_blocking panicked")?;
+
+        *self.vector.write().expect("vector RwLock poisoned") = Some(vi);
+        tracing::info!("vector index rebuilt");
         Ok(())
     }
 
     /// Hybrid BM25 + vector ANN search.
     ///
     /// Falls back to pure BM25 if the vector index has not been built yet.
+    /// Vector search (fastembed ONNX inference) runs on the blocking thread pool.
     #[instrument(skip(self), fields(limit))]
-    pub fn search_hybrid(&self, query: &str, limit: usize) -> Vec<(u32, f32)> {
+    pub async fn search_hybrid(&self, query: &str, limit: usize) -> Vec<(u32, f32)> {
         let terms = self.tokenizer.tokenize(query);
-        let guard = self.vector.read().expect("vector RwLock poisoned");
 
-        let Some(vi) = guard.as_ref().map(Arc::clone) else {
-            drop(guard);
+        // Scope the RwLockReadGuard so it is dropped before any .await point.
+        // RwLockReadGuard is !Send, so it must not be held across an await.
+        let vi: Option<Arc<VectorIndex>> = {
+            let guard = self.vector.read().expect("vector RwLock poisoned");
+            guard.as_ref().map(Arc::clone)
+        };
+
+        let Some(vi) = vi else {
             return self.scorer.search(&terms, limit);
         };
-        drop(guard);
 
-        if self.hybrid_alpha == 0.5 {
-            // No explicit alpha configured — let QPP predict the optimal blend.
-            HybridScorer::with_fields(Arc::clone(&self.name_index), Arc::clone(&self.body_index), vi)
-                .search_adaptive(query, &terms, limit)
-        } else {
-            // Explicit alpha set via NEXUS_HYBRID_ALPHA — honour it.
-            HybridScorer::new(
-                Bm25Scorer::with_fields(Arc::clone(&self.name_index), Arc::clone(&self.body_index)),
-                vi,
-                self.hybrid_alpha,
-            )
-            .search(&terms, limit)
-        }
+        let query_owned = query.to_string();
+        let name_idx = Arc::clone(&self.name_index);
+        let body_idx = Arc::clone(&self.body_index);
+        let hybrid_alpha = self.hybrid_alpha;
+
+        tokio::task::spawn_blocking(move || {
+            if hybrid_alpha == 0.5 {
+                // No explicit alpha — let QPP predict the optimal blend.
+                HybridScorer::with_fields(name_idx, body_idx, vi)
+                    .search_adaptive(&query_owned, &terms, limit)
+            } else {
+                // Explicit alpha set via NEXUS_HYBRID_ALPHA — honour it.
+                HybridScorer::new(
+                    Bm25Scorer::with_fields(name_idx, body_idx),
+                    vi,
+                    hybrid_alpha,
+                )
+                .search(&terms, limit)
+            }
+        })
+        .await
+        .expect("spawn_blocking panicked")
     }
 
     // -----------------------------------------------------------------------
@@ -339,6 +382,7 @@ impl Node {
         let tokens = tokens_from_features(&code_features);
         self.index.index_document(doc_id, &tokens);
         self.body_index.index_document(doc_id, &tokens);
+        self.doc_text.insert(doc_id, tokens.join(" "));
         tracing::debug!(doc_id, tokens = tokens.len(), "indexed code file");
         Ok(())
     }

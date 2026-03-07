@@ -5,8 +5,6 @@ use nexus_core::indexer::posting::PostingList;
 use nexus_core::indexer::inverted::InvertedIndex;
 use nexus_core::indexer::tokenizer::Tokenizer;
 use nexus_core::scoring::bm25::Bm25Scorer;
-use nexus_core::scoring::hybrid::HybridScorer;
-use nexus_core::scoring::vector::VectorIndex;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -129,56 +127,6 @@ fn bench_tokenizer_throughput(c: &mut Criterion) {
     });
 }
 
-fn bench_hnsw_build(c: &mut Criterion) {
-    let corpus = synthetic_corpus(1_000, 100);
-    let idx = build_index(&corpus);
-
-    c.bench_function("hnsw_build_1000_docs", |b| {
-        b.iter(|| {
-            let vi = VectorIndex::new(Arc::clone(&idx)).expect("build vi");
-            for id in 0..1_000u32 {
-                let _ = vi.insert(id);
-            }
-            std::hint::black_box(vi);
-        });
-    });
-}
-
-fn bench_hnsw_search(c: &mut Criterion) {
-    let corpus = synthetic_corpus(1_000, 100);
-    let idx = build_index(&corpus);
-    let vi = VectorIndex::new(Arc::clone(&idx)).expect("build vi");
-    for id in 0..1_000u32 {
-        let _ = vi.insert(id);
-    }
-    let query = vec!["token_0".to_string(), "token_1".to_string()];
-
-    c.bench_function("hnsw_search_1000_docs", |b| {
-        b.iter(|| {
-            std::hint::black_box(vi.search(&query, 10));
-        });
-    });
-}
-
-fn bench_hybrid_search(c: &mut Criterion) {
-    let _ = rayon::current_num_threads();
-    let corpus = synthetic_corpus(1_000, 100);
-    let idx = build_index(&corpus);
-    let vi = VectorIndex::new(Arc::clone(&idx)).expect("build vi");
-    for id in 0..1_000u32 {
-        let _ = vi.insert(id);
-    }
-    let bm25 = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
-    let scorer = HybridScorer::new(bm25, Arc::new(vi), 0.5);
-    let query = vec!["token_0".to_string(), "token_1".to_string()];
-
-    c.bench_function("hybrid_search_1000_docs", |b| {
-        b.iter(|| {
-            std::hint::black_box(scorer.search(&query, 10));
-        });
-    });
-}
-
 // ---------------------------------------------------------------------------
 // BP128 serde benchmarks
 // ---------------------------------------------------------------------------
@@ -224,9 +172,6 @@ criterion_group!(
     bench_bm25_search_10k,
     bench_bm25_search_100k,
     bench_tokenizer_throughput,
-    bench_hnsw_build,
-    bench_hnsw_search,
-    bench_hybrid_search,
     bench_bp128_serde,
 );
 criterion_main!(benches);
