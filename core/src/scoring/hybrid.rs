@@ -236,7 +236,8 @@ mod tests {
 
     #[test]
     fn test_alpha_one_matches_bm25_order() {
-        // With alpha=1.0, order should be dominated by BM25 (modulo equal-score ties).
+        // With alpha=1.0 and an empty vector index (no ANN candidates), hybrid
+        // reduces to pure BM25 — the candidate set and scores are identical.
         let idx = Arc::new(InvertedIndex::new());
         let docs: &[&[&str]] = &[
             &["rust", "rust", "rust", "fast"],
@@ -247,12 +248,14 @@ mod tests {
             let owned: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
             idx.index_document(i as u32, &owned);
         }
+        // Vector index built from same vocabulary but no docs inserted — no ANN candidates,
+        // so hybrid candidate set == BM25 candidate set.
         let vi = VectorIndex::new(Arc::clone(&idx)).expect("build vi");
-        for i in 0..3u32 {
-            let _ = vi.insert(i);
-        }
-        let bm25_for_check = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
-        let bm25_for_hybrid = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
+        // Intentionally no vi.insert() calls — empty ANN graph.
+
+        let name_idx = Arc::new(InvertedIndex::new());
+        let bm25_for_check = Bm25Scorer::with_fields(Arc::clone(&name_idx), Arc::clone(&idx));
+        let bm25_for_hybrid = Bm25Scorer::with_fields(Arc::clone(&name_idx), Arc::clone(&idx));
         let hybrid = HybridScorer::new(bm25_for_hybrid, Arc::new(vi), 1.0);
 
         let hybrid_results = hybrid.search(&["rust".to_string()], 10);
@@ -261,7 +264,7 @@ mod tests {
         let hybrid_ids: Vec<u32> = hybrid_results.iter().map(|(id, _)| *id).collect();
         let bm25_ids: Vec<u32> = bm25_results.iter().map(|(id, _)| *id).collect();
 
-        // The top result should agree (doc 0 has the most "rust" occurrences).
+        // Same candidate set + alpha=1.0 → identical top result.
         assert_eq!(hybrid_ids.first(), bm25_ids.first());
     }
 }
