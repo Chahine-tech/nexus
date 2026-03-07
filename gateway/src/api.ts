@@ -27,6 +27,7 @@ setInterval(() => {
 interface RawShardHit {
   doc_id: number
   score: number
+  url?: string
 }
 
 interface NodeStats {
@@ -41,9 +42,9 @@ function parseShardResponse(raw: unknown): RawShardHit[] | null {
   for (const item of raw) {
     if (typeof item !== "object" || item === null) return null
     const rec = item as Record<string, unknown>
-    const { doc_id, score } = rec
+    const { doc_id, score, url } = rec
     if (typeof doc_id !== "number" || typeof score !== "number") return null
-    value.push({ doc_id, score })
+    value.push({ doc_id, score, ...(typeof url === "string" ? { url } : {}) })
   }
   return value
 }
@@ -81,7 +82,7 @@ function fetchShardEffect(
       if (parsed === null) {
         throw new DeserializationError({ raw: new Uint8Array(body), cause: "unexpected shape" })
       }
-      return parsed.map((r) => ({ id: String(r.doc_id), score: r.score }))
+      return parsed.map((r) => ({ id: String(r.doc_id), score: r.score, ...(r.url ? { url: r.url } : {}) }))
     },
     catch: (err) => {
       if (err instanceof NodeDeadError || err instanceof DeserializationError) return err

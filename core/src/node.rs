@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use dashmap::DashMap;
 use tracing::instrument;
 
 use crate::ast::features;
@@ -25,6 +26,10 @@ pub struct Node {
     /// Weight of BM25 vs vector in hybrid search. Range [0.0, 1.0].
     hybrid_alpha: f32,
     pagerank: RwLock<LocalPageRank>,
+    /// URL → doc_id mapping for deduplication on insert.
+    url_index: DashMap<String, u32>,
+    /// doc_id → URL reverse mapping for O(1) lookup at search time.
+    doc_index: DashMap<u32, String>,
 }
 
 impl Node {
@@ -44,6 +49,8 @@ impl Node {
             vector: RwLock::new(None),
             hybrid_alpha: 0.5,
             pagerank: RwLock::new(LocalPageRank::new()),
+            url_index: DashMap::new(),
+            doc_index: DashMap::new(),
         }
     }
 
@@ -60,6 +67,30 @@ impl Node {
     /// Returns `true` if PageRank has been computed at least once.
     pub fn pagerank_ready(&self) -> bool {
         !self.pagerank.read().expect("pagerank RwLock poisoned").ranked().is_empty()
+    }
+
+    /// Indexes a document identified by `url`.
+    ///
+    /// The doc_id is derived from the URL via FNV-1a 32-bit hash. If the URL was
+    /// already indexed, the existing doc_id is returned without re-indexing.
+    /// Returns the doc_id used.
+    #[instrument(skip(self, text), fields(url))]
+    pub fn index_url(&self, url: &str, text: &str) -> u32 {
+        if let Some(existing) = self.url_index.get(url) {
+            return *existing;
+        }
+        let doc_id = fnv1a_32(url.as_bytes());
+        self.url_index.insert(url.to_string(), doc_id);
+        self.doc_index.insert(doc_id, url.to_string());
+        let tokens = self.tokenizer.tokenize(text);
+        self.index.index_document(doc_id, &tokens);
+        tracing::debug!(doc_id, url, tokens = tokens.len(), "indexed document");
+        doc_id
+    }
+
+    /// Returns the URL associated with `doc_id`, or `None` if not indexed via `index_url`.
+    pub fn url_for_doc(&self, doc_id: u32) -> Option<String> {
+        self.doc_index.get(&doc_id).map(|v| v.clone())
     }
 
     /// Tokenizes `text` and indexes it under `doc_id`.
@@ -255,9 +286,41 @@ impl Default for Node {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// FNV-1a 32-bit hash — used as a stable, URL-derived doc_id.
+pub(crate) fn fnv1a_32(data: &[u8]) -> u32 {
+    let mut hash: u32 = 2166136261;
+    for &byte in data {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(16777619);
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fnv1a_32_properties() {
+        // Stable: same input always yields same output.
+        assert_eq!(fnv1a_32(b"hello"), fnv1a_32(b"hello"));
+        // Different inputs yield different outputs.
+        assert_ne!(fnv1a_32(b"hello"), fnv1a_32(b"world"));
+        // Empty input yields the FNV offset basis.
+        assert_eq!(fnv1a_32(b""), 2166136261);
+    }
+
+    #[test]
+    fn index_url_deduplication() {
+        let node = Node::new();
+        let id1 = node.index_url("https://example.com/foo", "hello world");
+        let id2 = node.index_url("https://example.com/foo", "different text");
+        assert_eq!(id1, id2, "same URL must return same doc_id");
+    }
 
     #[test]
     fn from_index_preserves_data() {

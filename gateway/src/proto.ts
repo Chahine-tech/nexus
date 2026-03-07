@@ -9,6 +9,7 @@ export interface QueryRequest {
 export interface NodeResult {
   id: string
   score: number
+  url?: string
   snippet?: string
 }
 

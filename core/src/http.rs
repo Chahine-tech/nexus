@@ -41,6 +41,8 @@ pub struct SearchParams {
 pub struct SearchResult {
     pub doc_id: u32,
     pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -70,7 +72,15 @@ async fn search_handler(
         .collect();
 
     let results = state.router.route_query(terms, limit, 0).await;
-    Json(results.into_iter().map(|(doc_id, score)| SearchResult { doc_id, score }).collect())
+    Json(
+        results
+            .into_iter()
+            .map(|(doc_id, score)| {
+                let url = state.node.url_for_doc(doc_id);
+                SearchResult { doc_id, score, url }
+            })
+            .collect(),
+    )
 }
 
 /// BM25-only local search — bypasses the distributed router.
@@ -83,7 +93,15 @@ async fn local_search_handler(
 ) -> Json<Vec<SearchResult>> {
     let limit = params.limit.unwrap_or(10).min(100);
     let results = state.node.search(&params.q, limit);
-    Json(results.into_iter().map(|(doc_id, score)| SearchResult { doc_id, score }).collect())
+    Json(
+        results
+            .into_iter()
+            .map(|(doc_id, score)| {
+                let url = state.node.url_for_doc(doc_id);
+                SearchResult { doc_id, score, url }
+            })
+            .collect(),
+    )
 }
 
 async fn health_handler() -> Json<HashMap<&'static str, &'static str>> {
@@ -206,19 +224,8 @@ async fn index_handler(
     if url::Url::parse(&body.url).is_err() {
         return StatusCode::BAD_REQUEST;
     }
-    // Derive a stable doc_id from the URL via FNV-1a hash (same approach as crawler link ids).
-    let doc_id = fnv1a_32(body.url.as_bytes());
-    state.node.index_document(doc_id, &body.text);
+    state.node.index_url(&body.url, &body.text);
     StatusCode::OK
-}
-
-fn fnv1a_32(data: &[u8]) -> u32 {
-    let mut hash: u32 = 2166136261;
-    for &byte in data {
-        hash ^= byte as u32;
-        hash = hash.wrapping_mul(16777619);
-    }
-    hash
 }
 
 #[derive(Deserialize)]
