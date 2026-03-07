@@ -74,7 +74,7 @@ fn bench_bm25_search(c: &mut Criterion) {
 
     let corpus = synthetic_corpus(1000, 100);
     let idx = build_index(&corpus);
-    let scorer = Bm25Scorer::with_defaults(Arc::clone(&idx));
+    let scorer = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
     let query = vec![
         "token_0".to_string(),
         "token_1".to_string(),
@@ -93,7 +93,7 @@ fn bench_bm25_search_10k(c: &mut Criterion) {
     let _ = rayon::current_num_threads();
     let corpus = synthetic_corpus(10_000, 50);
     let idx = build_index(&corpus);
-    let scorer = Bm25Scorer::with_defaults(Arc::clone(&idx));
+    let scorer = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
     let query = vec!["token_0".to_string(), "token_1".to_string()];
 
     c.bench_function("bm25_search_10k_docs", |b| {
@@ -108,7 +108,7 @@ fn bench_bm25_search_100k(c: &mut Criterion) {
     // Build corpus outside the measurement loop (slow to construct).
     let corpus = synthetic_corpus(100_000, 50);
     let idx = build_index(&corpus);
-    let scorer = Bm25Scorer::with_defaults(Arc::clone(&idx));
+    let scorer = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
     let query = vec!["token_0".to_string(), "token_1".to_string()];
 
     c.bench_function("bm25_search_100k_docs", |b| {
@@ -168,7 +168,7 @@ fn bench_hybrid_search(c: &mut Criterion) {
     for id in 0..1_000u32 {
         let _ = vi.insert(id);
     }
-    let bm25 = Bm25Scorer::with_defaults(Arc::clone(&idx));
+    let bm25 = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
     let scorer = HybridScorer::new(bm25, Arc::new(vi), 0.5);
     let query = vec!["token_0".to_string(), "token_1".to_string()];
 

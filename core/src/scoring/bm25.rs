@@ -58,12 +58,6 @@ impl Bm25Scorer {
         Self { fields, params, global_n: Arc::new(AtomicU64::new(0)) }
     }
 
-    /// Single-field scorer — backward-compatible constructor used in tests and
-    /// places that don't need field separation (e.g. AST code indexing).
-    pub fn with_defaults(index: Arc<InvertedIndex>) -> Self {
-        Self::new(vec![Field { index, boost: 1.0 }], Bm25Params::default())
-    }
-
     /// Two-field scorer: `name` (boosted) + `body`.
     pub fn with_fields(name: Arc<InvertedIndex>, body: Arc<InvertedIndex>) -> Self {
         Self::new(
@@ -191,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_search_returns_relevant_docs() {
-        let scorer = Bm25Scorer::with_defaults(build_index());
+        let scorer = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), build_index());
         let results = scorer.search(&["rust".to_string()], 10);
         let ids: Vec<u32> = results.iter().map(|(id, _)| *id).collect();
 
@@ -203,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_scores_sorted_descending() {
-        let scorer = Bm25Scorer::with_defaults(build_index());
+        let scorer = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), build_index());
         let results = scorer.search(&["rust".to_string(), "fast".to_string()], 10);
         for window in results.windows(2) {
             assert!(
@@ -217,13 +211,13 @@ mod tests {
 
     #[test]
     fn test_empty_query_returns_empty() {
-        let scorer = Bm25Scorer::with_defaults(build_index());
+        let scorer = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), build_index());
         assert!(scorer.search(&[], 10).is_empty());
     }
 
     #[test]
     fn test_limit_respected() {
-        let scorer = Bm25Scorer::with_defaults(build_index());
+        let scorer = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), build_index());
         let results = scorer.search(&["rust".to_string()], 2);
         assert!(results.len() <= 2);
     }

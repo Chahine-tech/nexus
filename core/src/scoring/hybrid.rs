@@ -28,14 +28,6 @@ impl HybridScorer {
         Self { bm25, vector, alpha }
     }
 
-    /// Convenience constructor with default `alpha = 0.5`.
-    ///
-    /// Uses the body index for QPP feature extraction (IDF-based features).
-    pub fn with_defaults(index: Arc<InvertedIndex>, vector: Arc<VectorIndex>) -> Self {
-        let bm25 = Bm25Scorer::with_defaults(index);
-        Self::new(bm25, vector, 0.5)
-    }
-
     /// Two-field constructor: `name` + `body`, with default `alpha = 0.5`.
     pub fn with_fields(
         name: Arc<InvertedIndex>,
@@ -150,7 +142,7 @@ mod tests {
             let _ = vi.insert(i); // doc 1 and 3 may have terms in vocab — ignore NoTermsInVocab
         }
 
-        let bm25 = Bm25Scorer::with_defaults(Arc::clone(&idx));
+        let bm25 = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
         Ok(HybridScorer::new(bm25, Arc::new(vi), alpha))
     }
 
@@ -218,7 +210,7 @@ mod tests {
         }
         let vi = VectorIndex::new(Arc::clone(&idx)).expect("build vi");
         for i in 0..3u32 { let _ = vi.insert(i); }
-        let bm25 = Bm25Scorer::with_defaults(Arc::clone(&idx));
+        let bm25 = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
         let scorer = HybridScorer::new(bm25, Arc::new(vi), 0.5);
 
         let code_features = crate::scoring::query_features::QueryFeatures::extract(
@@ -259,8 +251,8 @@ mod tests {
         for i in 0..3u32 {
             let _ = vi.insert(i);
         }
-        let bm25_for_check = Bm25Scorer::with_defaults(Arc::clone(&idx));
-        let bm25_for_hybrid = Bm25Scorer::with_defaults(Arc::clone(&idx));
+        let bm25_for_check = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
+        let bm25_for_hybrid = Bm25Scorer::with_fields(Arc::new(InvertedIndex::new()), Arc::clone(&idx));
         let hybrid = HybridScorer::new(bm25_for_hybrid, Arc::new(vi), 1.0);
 
         let hybrid_results = hybrid.search(&["rust".to_string()], 10);
