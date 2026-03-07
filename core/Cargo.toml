@@ -18,6 +18,7 @@ serde = { version = "1", features = ["derive"] }
 rmp-serde = "1"
 
 # Index
+rust-stemmers = "1"
 roaring = "0.11"
 bitpacking = { version = "0.9", features = ["bitpacker4x"], default-features = false }
 dashmap = "6"

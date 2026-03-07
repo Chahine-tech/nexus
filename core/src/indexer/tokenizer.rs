@@ -1,3 +1,4 @@
+use rust_stemmers::{Algorithm, Stemmer};
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
@@ -10,9 +11,11 @@ static STOP_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     .collect()
 });
 
+static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::English));
+
 /// Stateless tokenizer for plain text and code.
 ///
-/// Pipeline: lowercase → split on non-alphanumeric → filter stop words + short tokens.
+/// Pipeline: lowercase → split on non-alphanumeric → filter stop words + short tokens → Snowball stem.
 pub struct Tokenizer;
 
 impl Tokenizer {
@@ -20,14 +23,14 @@ impl Tokenizer {
         Self
     }
 
-    /// Tokenizes `text` into a list of normalized tokens.
+    /// Tokenizes `text` into a list of normalized, stemmed tokens.
     ///
-    /// Tokens shorter than 2 characters and stop words are discarded.
+    /// Tokens shorter than 2 characters and stop words are discarded before stemming.
     pub fn tokenize(&self, text: &str) -> Vec<String> {
         text.to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
             .filter(|tok| tok.len() >= 2 && !STOP_WORDS.contains(tok))
-            .map(|tok| tok.to_string())
+            .map(|tok| STEMMER.stem(tok).into_owned())
             .collect()
     }
 }
@@ -88,7 +91,22 @@ mod tests {
         let t = Tokenizer::new();
         let tokens = t.tokenize("fn main() -> Result<(), Error> {");
         assert!(tokens.contains(&"main".to_string()));
+        // "result" and "error" are already fully stemmed
         assert!(tokens.contains(&"result".to_string()));
         assert!(tokens.contains(&"error".to_string()));
+    }
+
+    #[test]
+    fn test_stemming_running() {
+        let t = Tokenizer::new();
+        let tokens = t.tokenize("running");
+        assert_eq!(tokens, vec!["run".to_string()]);
+    }
+
+    #[test]
+    fn test_stemming_errors() {
+        let t = Tokenizer::new();
+        let tokens = t.tokenize("errors");
+        assert_eq!(tokens, vec!["error".to_string()]);
     }
 }

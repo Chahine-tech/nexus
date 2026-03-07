@@ -50,6 +50,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health_handler))
         .route("/stats", get(stats_handler))
         .route("/crawl", post(crawl_handler))
+        .route("/index", post(index_handler))
         .route("/export-shard", get(export_shard_handler))
         .route("/merge-shard", post(merge_shard_handler))
         .with_state(state)
@@ -188,6 +189,36 @@ async fn merge_shard_handler(
     };
     let _ = state.node.merge_posting_shard(&body.term, posting);
     StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct IndexBody {
+    url: String,
+    text: String,
+}
+
+/// Indexes a document directly from pre-extracted text, bypassing the crawler.
+/// Useful for benchmarking and ingesting content from external pipelines.
+async fn index_handler(
+    State(state): State<AppState>,
+    Json(body): Json<IndexBody>,
+) -> StatusCode {
+    if url::Url::parse(&body.url).is_err() {
+        return StatusCode::BAD_REQUEST;
+    }
+    // Derive a stable doc_id from the URL via FNV-1a hash (same approach as crawler link ids).
+    let doc_id = fnv1a_32(body.url.as_bytes());
+    state.node.index_document(doc_id, &body.text);
+    StatusCode::OK
+}
+
+fn fnv1a_32(data: &[u8]) -> u32 {
+    let mut hash: u32 = 2166136261;
+    for &byte in data {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(16777619);
+    }
+    hash
 }
 
 #[derive(Deserialize)]

@@ -39,10 +39,14 @@ cd gateway && bun run index.ts
 | Script | Purpose |
 |--------|---------|
 | `tools/train_alpha.py` | Fit BM25/vector fusion weights from 100 labeled queries (no API). Outputs `WEIGHTS`/`BIAS` constants for `query_features.rs`. |
+| `tools/benchmark.py` | Benchmark Nexus vs Tantivy on the crates.io corpus (MRR@10, Hits@1, QPS). |
 
 ```bash
+# Train QPP weights
 python3 tools/train_alpha.py
-# → prints trained constants to paste into core/src/scoring/query_features.rs
+
+# Benchmark (requires Nexus running on localhost:3000, or --no-nexus for Tantivy only)
+python3 tools/benchmark.py --skip-download --no-nexus
 ```
 
 ## Docs
