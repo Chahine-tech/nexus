@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use dashmap::DashMap;
@@ -18,7 +19,12 @@ use crate::scoring::vector::{VectorError, VectorIndex};
 
 /// Core search node — owns the index, scorers, and local PageRank graph.
 pub struct Node {
+    /// Primary (flat) index — used for shard export/import, AST indexing, and legacy paths.
     pub index: Arc<InvertedIndex>,
+    /// Dedicated `name` field index. Short documents → low avgdl → high TF_norm for exact matches.
+    name_index: Arc<InvertedIndex>,
+    /// Dedicated `body` field index (description + keywords). Shares doc_count with `index`.
+    body_index: Arc<InvertedIndex>,
     tokenizer: Tokenizer,
     scorer: Bm25Scorer,
     /// HNSW vector index. Wrapped in Arc+RwLock: Arc allows cheap cloning for HybridScorer.
@@ -30,6 +36,8 @@ pub struct Node {
     url_index: DashMap<String, u32>,
     /// doc_id → URL reverse mapping for O(1) lookup at search time.
     doc_index: DashMap<u32, String>,
+    /// Shared handle into `scorer.global_n` — updated from gossip.
+    global_n: Arc<AtomicU64>,
 }
 
 impl Node {
@@ -39,11 +47,19 @@ impl Node {
     }
 
     /// Creates a node from an already-built inverted index (e.g. loaded from disk).
+    ///
+    /// Uses a single flat index for both `name` and `body` — no field boosting.
+    /// Call `index_url_fields` after construction to populate the fielded indexes.
     pub fn from_index(index: Arc<InvertedIndex>) -> Self {
+        let name_index = Arc::new(InvertedIndex::new());
+        let body_index = Arc::new(InvertedIndex::new());
         let tokenizer = Tokenizer::new();
-        let scorer = Bm25Scorer::with_defaults(Arc::clone(&index));
+        let scorer = Bm25Scorer::with_fields(Arc::clone(&name_index), Arc::clone(&body_index));
+        let global_n = scorer.global_n_handle();
         Self {
             index,
+            name_index,
+            body_index,
             tokenizer,
             scorer,
             vector: RwLock::new(None),
@@ -51,12 +67,21 @@ impl Node {
             pagerank: RwLock::new(LocalPageRank::new()),
             url_index: DashMap::new(),
             doc_index: DashMap::new(),
+            global_n,
         }
     }
 
     /// Total number of indexed documents.
     pub fn doc_count(&self) -> u64 {
         self.index.doc_count()
+    }
+
+    /// Updates the global document count used for BM25 IDF computation.
+    ///
+    /// Call this periodically from the gossip loop with `GossipEngine::global_doc_count()`.
+    /// When `n` is 0, BM25 falls back to the local doc count.
+    pub fn update_global_doc_count(&self, n: u64) {
+        self.global_n.store(n, Ordering::Relaxed);
     }
 
     /// Number of unique terms in the vocabulary.
@@ -69,11 +94,43 @@ impl Node {
         !self.pagerank.read().expect("pagerank RwLock poisoned").ranked().is_empty()
     }
 
-    /// Indexes a document identified by `url`.
+    /// Indexes a document identified by `url` into separate `name` and `body` fields.
     ///
     /// The doc_id is derived from the URL via FNV-1a 32-bit hash. If the URL was
     /// already indexed, the existing doc_id is returned without re-indexing.
+    ///
+    /// `name` tokens are indexed into the boosted name field (boost=3.0 in BM25).
+    /// `body` tokens are indexed into the body field (boost=1.0).
+    /// Both are also merged into the flat `index` for shard export/import compatibility.
+    ///
     /// Returns the doc_id used.
+    #[instrument(skip(self, name, body), fields(url))]
+    pub fn index_url_fields(&self, url: &str, name: &str, body: &str) -> u32 {
+        if let Some(existing) = self.url_index.get(url) {
+            return *existing;
+        }
+        let doc_id = fnv1a_32(url.as_bytes());
+        self.url_index.insert(url.to_string(), doc_id);
+        self.doc_index.insert(doc_id, url.to_string());
+
+        let name_tokens = self.tokenizer.tokenize(name);
+        let body_tokens = self.tokenizer.tokenize(body);
+
+        self.name_index.index_document(doc_id, &name_tokens);
+        self.body_index.index_document(doc_id, &body_tokens);
+
+        // Flat index = name + body for shard rebalancing compatibility.
+        let mut all_tokens = name_tokens.clone();
+        all_tokens.extend_from_slice(&body_tokens);
+        self.index.index_document(doc_id, &all_tokens);
+
+        tracing::debug!(doc_id, url, name_tokens = name_tokens.len(), body_tokens = body_tokens.len(), "indexed document (fielded)");
+        doc_id
+    }
+
+    /// Indexes a document identified by `url` (flat, no field separation).
+    ///
+    /// Falls back to single-field BM25 — use `index_url_fields` for better ranking.
     #[instrument(skip(self, text), fields(url))]
     pub fn index_url(&self, url: &str, text: &str) -> u32 {
         if let Some(existing) = self.url_index.get(url) {
@@ -84,6 +141,8 @@ impl Node {
         self.doc_index.insert(doc_id, url.to_string());
         let tokens = self.tokenizer.tokenize(text);
         self.index.index_document(doc_id, &tokens);
+        // Also index into body field so scorer has candidates.
+        self.body_index.index_document(doc_id, &tokens);
         tracing::debug!(doc_id, url, tokens = tokens.len(), "indexed document");
         doc_id
     }
@@ -94,10 +153,13 @@ impl Node {
     }
 
     /// Tokenizes `text` and indexes it under `doc_id`.
+    ///
+    /// Also indexes into `body_index` so the multi-field scorer has candidates.
     #[instrument(skip(self, text), fields(doc_id))]
     pub fn index_document(&self, doc_id: u32, text: &str) {
         let tokens = self.tokenizer.tokenize(text);
         self.index.index_document(doc_id, &tokens);
+        self.body_index.index_document(doc_id, &tokens);
         tracing::debug!(doc_id, tokens = tokens.len(), "indexed document");
     }
 
@@ -157,13 +219,14 @@ impl Node {
         guard.as_ref().map(|vi| vi.vocab_size()).unwrap_or(0)
     }
 
-    /// (Re-)builds the HNSW vector index from the current inverted index.
+    /// (Re-)builds the HNSW vector index from the body field index.
     ///
+    /// Uses `body_index` for vocabulary (richer term distribution than `name_index`).
     /// Must be called after bulk indexing before `search_hybrid` returns vector results.
     #[instrument(skip(self))]
     pub fn rebuild_vector_index(&self) -> Result<(), VectorError> {
-        let vi = VectorIndex::new(Arc::clone(&self.index))?;
-        let doc_ids = self.index.all_doc_ids();
+        let vi = VectorIndex::new(Arc::clone(&self.body_index))?;
+        let doc_ids = self.body_index.all_doc_ids();
         for doc_id in doc_ids {
             // Ignore NoTermsInVocab — the doc may have been indexed after the vocab snapshot.
             let _ = vi.insert(doc_id);
@@ -189,12 +252,12 @@ impl Node {
 
         if self.hybrid_alpha == 0.5 {
             // No explicit alpha configured — let QPP predict the optimal blend.
-            HybridScorer::with_defaults(Arc::clone(&self.index), vi)
+            HybridScorer::with_fields(Arc::clone(&self.name_index), Arc::clone(&self.body_index), vi)
                 .search_adaptive(query, &terms, limit)
         } else {
             // Explicit alpha set via NEXUS_HYBRID_ALPHA — honour it.
             HybridScorer::new(
-                Bm25Scorer::with_defaults(Arc::clone(&self.index)),
+                Bm25Scorer::with_fields(Arc::clone(&self.name_index), Arc::clone(&self.body_index)),
                 vi,
                 self.hybrid_alpha,
             )
@@ -275,6 +338,7 @@ impl Node {
 
         let tokens = tokens_from_features(&code_features);
         self.index.index_document(doc_id, &tokens);
+        self.body_index.index_document(doc_id, &tokens);
         tracing::debug!(doc_id, tokens = tokens.len(), "indexed code file");
         Ok(())
     }

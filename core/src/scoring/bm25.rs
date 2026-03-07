@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rayon::prelude::*;
@@ -22,63 +23,123 @@ impl Default for Bm25Params {
     }
 }
 
-/// BM25 scorer backed by a shared `InvertedIndex`.
+/// One indexed field with its boost weight.
+///
+/// BM25 is computed independently per field; scores are summed weighted by `boost`.
+/// Keeping fields separate preserves per-field `avgdl`, which is critical:
+/// a short `name` field (avgdl ≈ 2) has very different length normalization
+/// than a `body` field (avgdl ≈ 15).
+pub struct Field {
+    pub index: Arc<InvertedIndex>,
+    /// Multiplicative score weight. Typical values: name=3.0, body=1.0.
+    pub boost: f32,
+}
+
+/// Multi-field BM25 scorer.
+///
+/// Score formula:
+///   score(q, d) = Σ_field [ boost_field * Σ_term [ IDF(t,field) * TF_norm(t,d,field) ] ]
+///
+/// IDF is computed per-field using the field's own doc count (= total indexed docs,
+/// since every document is indexed in every field). Global N from gossip overrides
+/// the local count for accurate distributed IDF.
 pub struct Bm25Scorer {
-    pub(crate) index: Arc<InvertedIndex>,
+    /// Ordered list of fields. Field 0 is typically `name`, field 1 `body`.
+    /// Kept as `pub(crate)` so `HybridScorer` can clone the primary index.
+    pub(crate) fields: Vec<Field>,
     params: Bm25Params,
+    /// Global document count from gossip. When zero, falls back to local count.
+    global_n: Arc<AtomicU64>,
 }
 
 impl Bm25Scorer {
-    pub fn new(index: Arc<InvertedIndex>, params: Bm25Params) -> Self {
-        Self { index, params }
+    /// Constructs a scorer from an explicit field list and params.
+    pub fn new(fields: Vec<Field>, params: Bm25Params) -> Self {
+        Self { fields, params, global_n: Arc::new(AtomicU64::new(0)) }
     }
 
+    /// Single-field scorer — backward-compatible constructor used in tests and
+    /// places that don't need field separation (e.g. AST code indexing).
     pub fn with_defaults(index: Arc<InvertedIndex>) -> Self {
-        Self::new(index, Bm25Params::default())
+        Self::new(vec![Field { index, boost: 1.0 }], Bm25Params::default())
     }
 
-    /// BM25 score for `doc_id` against a multi-term query.
+    /// Two-field scorer: `name` (boosted) + `body`.
+    pub fn with_fields(name: Arc<InvertedIndex>, body: Arc<InvertedIndex>) -> Self {
+        Self::new(
+            vec![
+                Field { index: name, boost: 3.0 },
+                Field { index: body, boost: 1.0 },
+            ],
+            Bm25Params::default(),
+        )
+    }
+
+    /// Returns a clone of the `global_n` atomic so `Node` can share it.
+    pub fn global_n_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.global_n)
+    }
+
+    /// Returns the N to use in IDF: global if set, local (first field) otherwise.
+    fn effective_n(&self) -> f32 {
+        let g = self.global_n.load(Ordering::Relaxed);
+        if g > 0 {
+            g as f32
+        } else {
+            self.fields.first().map(|f| f.index.doc_count() as f32).unwrap_or(1.0)
+        }
+    }
+
+    /// BM25 score for `doc_id` against a multi-term query, summed across all fields.
     ///
-    ///   IDF(t)      = ln((N - df + 0.5) / (df + 0.5) + 1)
-    ///   TF_norm(t,d) = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl))
-    ///   score(q, d) = Σ_t [ IDF(t) * TF_norm(t, d) ]
+    ///   IDF(t,field)      = ln((N - df + 0.5) / (df + 0.5) + 1)
+    ///   TF_norm(t,d,field) = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl_field))
+    ///   score(q, d)        = Σ_field [ boost * Σ_t [ IDF * TF_norm ] ]
     pub fn score(&self, doc_id: u32, terms: &[String]) -> f32 {
-        let n = self.index.doc_count() as f32;
-        let avgdl = self.index.avg_doc_len();
-        let dl = self.index.total_tokens_in_doc(doc_id) as f32;
+        let n = self.effective_n();
         let k1 = self.params.k1;
         let b = self.params.b;
 
-        terms
+        self.fields
             .iter()
-            .filter_map(|term| {
-                // Access posting list via ref — no clone in hot path.
-                self.index.with_posting(term, |pl| {
-                    let df = pl.len() as f32;
-                    let tf = pl.tf(doc_id) as f32;
-                    if tf == 0.0 {
-                        return 0.0;
-                    }
-                    let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-                    let tf_norm =
-                        (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * dl / avgdl));
-                    idf * tf_norm
-                })
+            .map(|field| {
+                let avgdl = field.index.avg_doc_len();
+                let dl = field.index.total_tokens_in_doc(doc_id) as f32;
+
+                let field_score: f32 = terms
+                    .iter()
+                    .filter_map(|term| {
+                        field.index.with_posting(term, |pl| {
+                            let df = pl.len() as f32;
+                            let tf = pl.tf(doc_id) as f32;
+                            if tf == 0.0 {
+                                return 0.0;
+                            }
+                            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+                            let tf_norm =
+                                (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * dl / avgdl));
+                            idf * tf_norm
+                        })
+                    })
+                    .sum();
+
+                field.boost * field_score
             })
             .sum()
     }
 
     /// Returns the top `limit` documents for a query, sorted by descending score.
     ///
-    /// Candidate set = union of all posting list bitmaps for query terms.
+    /// Candidate set = union of posting lists across ALL fields and terms.
     /// Scoring is parallelized via rayon.
     pub fn search(&self, terms: &[String], limit: usize) -> Vec<(u32, f32)> {
-        // Build candidate union via ref — bitmap clone is unavoidable here
-        // since we cannot hold a DashMap shard ref across multiple iterations.
-        let candidates: RoaringBitmap = terms
+        let candidates: RoaringBitmap = self
+            .fields
             .iter()
-            .filter_map(|term| {
-                self.index.with_posting(term, |pl| pl.doc_ids().clone())
+            .flat_map(|field| {
+                terms.iter().filter_map(|term| {
+                    field.index.with_posting(term, |pl| pl.doc_ids().clone())
+                })
             })
             .fold(RoaringBitmap::new(), |mut acc, bm| {
                 acc |= bm;

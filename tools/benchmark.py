@@ -180,11 +180,15 @@ def build_nexus_index(docs: list[dict], nexus_url: str) -> None:
     print(f"[nexus] Indexing {len(docs):,} crates via {index_url}/index ...")
     ok = errors = 0
     for doc in tqdm(docs, desc="  indexing", unit="crate"):
-        body = " ".join(filter(None, [doc["name"], doc["description"], " ".join(doc["keywords"])]))
+        body = " ".join(filter(None, [doc["description"], " ".join(doc["keywords"])]))
         try:
             resp = requests.post(
                 f"{index_url}/index",
-                json={"url": f"https://crates.io/crates/{doc['name']}", "text": body},
+                json={
+                    "url": f"https://crates.io/crates/{doc['name']}",
+                    "name": doc["name"],
+                    "body": body,
+                },
                 timeout=5,
             )
             if resp.status_code == 200:

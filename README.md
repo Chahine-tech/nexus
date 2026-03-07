@@ -57,6 +57,20 @@ python3 tools/benchmark.py --no-nexus --corpus-size 500 --query-size 50
 
 Dependencies: `pip install requests tantivy tqdm`
 
+## Benchmark
+
+crates.io corpus (top 2,000 crates), 200 named-entity queries + 25 hand-labeled natural-language queries.
+
+| Suite | Nexus | Tantivy | Delta |
+|-------|-------|---------|-------|
+| NE MRR@10 | 0.9359 | 0.9422 | -0.0064 |
+| NE Hits@1 | 0.9000 | 0.9100 | -0.0100 |
+| NL MRR@10 | **0.3968** | 0.3840 | **+0.0128** |
+| NL Hits@1 | **0.3200** | 0.2800 | **+0.0400** |
+
+Named-entity gap closed from -7% → -0.6% after multi-field BM25 (name boost=3.0).
+Nexus wins on natural-language queries thanks to Snowball stemming + hybrid BM25/vector scoring.
+
 ## Docs
 
 - [CONSISTENCY.md](CONSISTENCY.md) — consistency model, CRDT proofs, PageRank convergence

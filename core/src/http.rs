@@ -129,6 +129,10 @@ async fn stats_handler(State(state): State<AppState>) -> Json<StatsResponse> {
     let top_pagerank = state.node.pagerank_ranked().into_iter().take(5).collect();
     let peer_count = state.gossip.peer_states().len();
     let estimated_global_terms = state.gossip.estimated_cardinality();
+
+    // Sync local doc_count into gossip, then propagate global N into BM25 scorer.
+    state.gossip.update_local(state.node.doc_count());
+    state.node.update_global_doc_count(state.gossip.global_doc_count());
     // Wire global_pagerank and pagerank_score for the top-ranked doc.
     if let Some((top_doc_id, _)) = state.node.pagerank_ranked().first() {
         let _ = state.gossip.global_pagerank(*top_doc_id);
@@ -212,11 +216,23 @@ async fn merge_shard_handler(
 #[derive(Deserialize)]
 struct IndexBody {
     url: String,
-    text: String,
+    /// Short identifier field (e.g. crate name, page title). Indexed with boost=3.0.
+    /// When absent, falls back to flat `text`-only indexing.
+    name: Option<String>,
+    /// Body text (description, content, keywords). Indexed with boost=1.0.
+    /// Also accepts legacy `text` field for backward compatibility.
+    #[serde(alias = "text")]
+    body: String,
 }
 
 /// Indexes a document directly from pre-extracted text, bypassing the crawler.
-/// Useful for benchmarking and ingesting content from external pipelines.
+///
+/// Accepts two forms:
+///   - Fielded: `{"url": "...", "name": "serde", "body": "serialization framework"}`
+///   - Legacy:  `{"url": "...", "text": "serde serialization framework"}`
+///
+/// Fielded indexing enables per-field BM25 boost (name×3, body×1), which
+/// significantly improves named-entity retrieval (MRR@10).
 async fn index_handler(
     State(state): State<AppState>,
     Json(body): Json<IndexBody>,
@@ -224,7 +240,14 @@ async fn index_handler(
     if url::Url::parse(&body.url).is_err() {
         return StatusCode::BAD_REQUEST;
     }
-    state.node.index_url(&body.url, &body.text);
+    if let Some(name) = &body.name {
+        state.node.index_url_fields(&body.url, name, &body.body);
+    } else {
+        state.node.index_url(&body.url, &body.body);
+    }
+    // Sync local doc_count into gossip so global_doc_count() is accurate immediately.
+    state.gossip.update_local(state.node.doc_count());
+    state.node.update_global_doc_count(state.gossip.global_doc_count());
     StatusCode::OK
 }
 

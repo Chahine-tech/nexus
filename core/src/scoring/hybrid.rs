@@ -29,8 +29,20 @@ impl HybridScorer {
     }
 
     /// Convenience constructor with default `alpha = 0.5`.
+    ///
+    /// Uses the body index for QPP feature extraction (IDF-based features).
     pub fn with_defaults(index: Arc<InvertedIndex>, vector: Arc<VectorIndex>) -> Self {
         let bm25 = Bm25Scorer::with_defaults(index);
+        Self::new(bm25, vector, 0.5)
+    }
+
+    /// Two-field constructor: `name` + `body`, with default `alpha = 0.5`.
+    pub fn with_fields(
+        name: Arc<InvertedIndex>,
+        body: Arc<InvertedIndex>,
+        vector: Arc<VectorIndex>,
+    ) -> Self {
+        let bm25 = Bm25Scorer::with_fields(name, body);
         Self::new(bm25, vector, 0.5)
     }
 
@@ -53,7 +65,10 @@ impl HybridScorer {
     ///
     /// `raw_query` is the original unprocessed string. `terms` is post-tokenization.
     pub fn search_adaptive(&self, raw_query: &str, terms: &[String], limit: usize) -> Vec<(u32, f32)> {
-        let features = QueryFeatures::extract(raw_query, terms, &self.bm25.index);
+        // Use the last field (body) for IDF features — it has the richest term distribution.
+        let feature_index = self.bm25.fields.last().map(|f| &*f.index)
+            .unwrap_or_else(|| &*self.bm25.fields[0].index);
+        let features = QueryFeatures::extract(raw_query, terms, feature_index);
         let alpha = features.predict_alpha();
         tracing::debug!(alpha, query = raw_query, "adaptive alpha predicted");
         let fetch = (limit * 4).max(20);

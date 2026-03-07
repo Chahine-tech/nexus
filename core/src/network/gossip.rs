@@ -149,6 +149,19 @@ impl GossipEngine {
         self.peers.iter().map(|e| e.value().clone()).collect()
     }
 
+    /// Returns the estimated global document count: local + sum of all peer doc_counts. Sync.
+    ///
+    /// Used by BM25 to compute IDF with a globally-consistent N, avoiding
+    /// per-shard IDF deflation in multi-node deployments.
+    pub fn global_doc_count(&self) -> u64 {
+        let local = {
+            let guard = self.local_state.read().expect("gossip RwLock poisoned");
+            guard.doc_count
+        };
+        let peer_sum: u64 = self.peers.iter().map(|e| e.value().doc_count).sum();
+        local + peer_sum
+    }
+
     // ---------------------------------------------------------------------------
     // IDF gossip — HyperLogLog sketch propagation
     // ---------------------------------------------------------------------------
