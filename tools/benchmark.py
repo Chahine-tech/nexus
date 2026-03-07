@@ -356,10 +356,20 @@ def run_nl_benchmark(
 
     def summarize(rr: list[float], lat: list[float]) -> dict:
         n = len(rr)
+        lat_ms = [x * 1000 for x in lat]
+        lat_sorted = sorted(lat_ms)
+        def percentile(data: list[float], p: float) -> float:
+            if not data:
+                return 0.0
+            idx = (len(data) - 1) * p / 100
+            lo, hi = int(idx), min(int(idx) + 1, len(data) - 1)
+            return data[lo] + (data[hi] - data[lo]) * (idx - lo)
         return {
             "mrr@10": sum(rr) / n if n else 0.0,
             "hits@1": sum(1 for r in rr if r == 1.0) / n if n else 0.0,
-            "median_ms": statistics.median(lat) * 1000 if lat else 0.0,
+            "p50_ms": percentile(lat_sorted, 50),
+            "p95_ms": percentile(lat_sorted, 95),
+            "p99_ms": percentile(lat_sorted, 99),
             "qps": n / sum(lat) if sum(lat) > 0 else 0.0,
         }
 
@@ -396,10 +406,20 @@ def run_benchmark(
 
     def summarize(rr: list[float], lat: list[float]) -> dict:
         n = len(rr)
+        lat_ms = [x * 1000 for x in lat]
+        lat_sorted = sorted(lat_ms)
+        def percentile(data: list[float], p: float) -> float:
+            if not data:
+                return 0.0
+            idx = (len(data) - 1) * p / 100
+            lo, hi = int(idx), min(int(idx) + 1, len(data) - 1)
+            return data[lo] + (data[hi] - data[lo]) * (idx - lo)
         return {
             "mrr@10": sum(rr) / n if n else 0.0,
             "hits@1": sum(1 for r in rr if r == 1.0) / n if n else 0.0,
-            "median_ms": statistics.median(lat) * 1000 if lat else 0.0,
+            "p50_ms": percentile(lat_sorted, 50),
+            "p95_ms": percentile(lat_sorted, 95),
+            "p99_ms": percentile(lat_sorted, 99),
             "qps": n / sum(lat) if sum(lat) > 0 else 0.0,
         }
 
@@ -430,10 +450,12 @@ def print_report(metrics: dict, n_queries: int, n_docs: int, title: str = "crate
     print(f"  {'-' * (52 if has_nexus else 36)}")
 
     rows = [
-        ("mrr@10",    "MRR@10",          "{:.4f}"),
-        ("hits@1",    "Hits@1",           "{:.4f}"),
-        ("median_ms", "Median latency ms","{:.2f}"),
-        ("qps",       "QPS",              "{:.1f}"),
+        ("mrr@10",  "MRR@10",      "{:.4f}"),
+        ("hits@1",  "Hits@1",      "{:.4f}"),
+        ("p50_ms",  "P50 lat ms",  "{:.2f}"),
+        ("p95_ms",  "P95 lat ms",  "{:.2f}"),
+        ("p99_ms",  "P99 lat ms",  "{:.2f}"),
+        ("qps",     "QPS",         "{:.1f}"),
     ]
     for key, label, fmt in rows:
         tv_val = tv.get(key, float("nan"))

@@ -1,3 +1,5 @@
 /target
 Nexus.md
 node_modules
+__pycache__/
+*.pyc

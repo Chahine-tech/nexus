@@ -39,7 +39,7 @@ cd gateway && bun run index.ts
 | Script | Purpose |
 |--------|---------|
 | `tools/train_alpha.py` | Fit BM25/vector fusion weights from 100 labeled queries (no API). Outputs `WEIGHTS`/`BIAS` constants for `query_features.rs`. |
-| `tools/benchmark.py` | Benchmark Nexus vs Tantivy on the crates.io corpus (MRR@10, Hits@1, QPS). Two suites: named-entity retrieval (crate name = query) and 25 hand-labeled natural-language queries. |
+| `tools/benchmark.py` | Benchmark Nexus vs Tantivy on the crates.io corpus (MRR@10, Hits@1, P50/P95/P99 latency, QPS). Two suites: named-entity retrieval (crate name = query) and 78 hand-labeled natural-language queries. |
 
 ```bash
 # Train QPP weights
@@ -61,15 +61,27 @@ Dependencies: `pip install requests tantivy tqdm`
 
 crates.io corpus (top 2,000 crates), 200 named-entity queries + 78 hand-labeled natural-language queries.
 
+### Relevance
+
 | Suite | Nexus | Tantivy | Delta |
 |-------|-------|---------|-------|
 | NE MRR@10 | **0.9714** | 0.9422 | **+0.0292** |
 | NE Hits@1 | **0.9500** | 0.9100 | **+0.0400** |
-| NL MRR@10 | 0.3496 | 0.3480 | +0.0016 |
-| NL Hits@1 | 0.1923 | 0.2564 | -0.0641 |
+| NL MRR@10 | 0.3470 | 0.3422 | +0.0048 |
+| NL Hits@1 | 0.1923 | 0.2436 | -0.0513 |
 
 Nexus wins on named-entity retrieval (+3% MRR@10) via BM25F with field boosts (name=3.0, body=1.0)
 and Snowball stemming. NL results are statistically equivalent (78 queries).
+
+### Latency (Nexus HTTP loopback, single node)
+
+| Suite | P50 | P95 | P99 |
+|-------|-----|-----|-----|
+| NE (200 queries) | 3.15 ms | 4.24 ms | 6.67 ms |
+| NL (78 queries)  | 3.35 ms | 13.75 ms | 18.75 ms |
+
+Tantivy runs in-process (no network); Nexus latency includes HTTP round-trip on loopback.
+NL P99 is higher due to hybrid BM25+vector scoring on longer queries.
 
 ## Docs
 
