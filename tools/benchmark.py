@@ -28,6 +28,12 @@ Methodology:
     - Metrics: MRR@10, Hits@1, median latency, QPS.
 
     Named-entity retrieval benchmark — reproducible, engine-agnostic.
+
+Two benchmark suites are run:
+  1. Named-entity (NE): query = crate name, expected = that exact crate.
+     Good for measuring exact-match precision but insensitive to stemming.
+  2. Natural-language (NL): 25 hand-labeled queries in plain English.
+     Each query has one expected crate. Sensitive to stemming and recall.
 """
 
 import argparse
@@ -213,6 +219,40 @@ def search_nexus(nexus_url: str, query: str, limit: int, docid_to_name: dict[int
 
 
 # ---------------------------------------------------------------------------
+# Natural-language query set — hand-labeled, stemmer-sensitive
+# ---------------------------------------------------------------------------
+
+# Each entry: (query, expected_crate_name)
+# Expected crate must be present in the corpus (top 2000 by downloads).
+NL_QUERIES: list[tuple[str, str]] = [
+    ("async runtime tokio",                  "tokio"),
+    ("serialize deserialize json",            "serde"),
+    ("serialize deserialize",                 "serde_json"),
+    ("http client requests",                  "reqwest"),
+    ("command line argument parsing",         "clap"),
+    ("error handling library",               "anyhow"),
+    ("random number generation",             "rand"),
+    ("logging structured tracing",           "tracing"),
+    ("regular expressions pattern matching", "regex"),
+    ("parallel iterators rayon",             "rayon"),
+    ("futures async combinators",            "futures"),
+    ("web framework actix",                  "actix-web"),
+    ("hash map concurrent",                  "dashmap"),
+    ("datetime time parsing",                "chrono"),
+    ("uuid generation unique identifier",    "uuid"),
+    ("compression gzip zlib",                "flate2"),
+    ("base64 encoding decoding",             "base64"),
+    ("cryptography hashing sha256",          "sha2"),
+    ("url parsing",                          "url"),
+    ("toml configuration parsing",           "toml"),
+    ("integer arbitrary precision",          "num"),
+    ("terminal color output",                "colored"),
+    ("image processing",                     "image"),
+    ("csv parsing reading",                  "csv"),
+    ("database sqlite",                      "rusqlite"),
+]
+
+# ---------------------------------------------------------------------------
 # Step 4 — Metrics
 # ---------------------------------------------------------------------------
 
@@ -222,6 +262,44 @@ def reciprocal_rank(results: list[str], expected: str) -> float:
         if name.lower() == expected.lower():
             return 1.0 / i
     return 0.0
+
+
+def run_nl_benchmark(
+    tantivy_index: tantivy.Index,
+    nexus_url: Optional[str],
+    docid_to_name: Optional[dict[int, str]] = None,
+) -> dict:
+    """Run the natural-language query set. Each query has one expected crate."""
+    print(f"\n[nl-benchmark] Running {len(NL_QUERIES)} natural-language queries ...")
+
+    tv_rr, tv_lat = [], []
+    nx_rr, nx_lat = [], []
+
+    for query, expected in tqdm(NL_QUERIES, desc="  querying", unit="query"):
+        t0 = time.perf_counter()
+        tv_results = search_tantivy(tantivy_index, query, SEARCH_LIMIT)
+        tv_lat.append(time.perf_counter() - t0)
+        tv_rr.append(reciprocal_rank(tv_results, expected))
+
+        if nexus_url:
+            t0 = time.perf_counter()
+            nx_results = search_nexus(nexus_url, query, SEARCH_LIMIT, docid_to_name or {})
+            nx_lat.append(time.perf_counter() - t0)
+            nx_rr.append(reciprocal_rank(nx_results, expected))
+
+    def summarize(rr: list[float], lat: list[float]) -> dict:
+        n = len(rr)
+        return {
+            "mrr@10": sum(rr) / n if n else 0.0,
+            "hits@1": sum(1 for r in rr if r == 1.0) / n if n else 0.0,
+            "median_ms": statistics.median(lat) * 1000 if lat else 0.0,
+            "qps": n / sum(lat) if sum(lat) > 0 else 0.0,
+        }
+
+    out = {"tantivy": summarize(tv_rr, tv_lat)}
+    if nexus_url:
+        out["nexus"] = summarize(nx_rr, nx_lat)
+    return out
 
 
 def run_benchmark(
@@ -269,13 +347,13 @@ def run_benchmark(
 # ---------------------------------------------------------------------------
 
 
-def print_report(metrics: dict, n_queries: int, n_docs: int) -> None:
+def print_report(metrics: dict, n_queries: int, n_docs: int, title: str = "crates.io benchmark") -> None:
     has_nexus = "nexus" in metrics
     nx = metrics.get("nexus", {})
     tv = metrics["tantivy"]
 
     print("\n" + "=" * 58)
-    print(f"  Nexus vs Tantivy — crates.io benchmark")
+    print(f"  Nexus vs Tantivy — {title}")
     print(f"  Corpus: {n_docs:,} crates  |  Queries: {n_queries}")
     print("=" * 58)
     header = f"  {'Metric':<24} {'Tantivy':>10}"
@@ -352,7 +430,10 @@ def main() -> None:
             docid_to_name[fnv1a_32(url)] = doc["name"]
 
     metrics = run_benchmark(queries, tantivy_index, nexus_url, docid_to_name)
-    print_report(metrics, n_queries=len(queries), n_docs=len(docs))
+    print_report(metrics, n_queries=len(queries), n_docs=len(docs), title="Named-entity retrieval")
+
+    nl_metrics = run_nl_benchmark(tantivy_index, nexus_url, docid_to_name)
+    print_report(nl_metrics, n_queries=len(NL_QUERIES), n_docs=len(docs), title="Natural-language queries")
 
 
 if __name__ == "__main__":

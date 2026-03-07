@@ -8,7 +8,7 @@ Distributed search engine — AST code indexing, hybrid BM25 + vector scoring, g
 nexus/
 ├── core/        Rust engine  — indexing, scoring, gossip, PageRank
 ├── gateway/     TypeScript   — HTTP/WebSocket API (Elysia + Bun)
-└── tools/       Python scripts — model training (train_alpha.py)
+└── tools/       Python scripts — benchmarking (benchmark.py) + model training (train_alpha.py)
 ```
 
 Nodes communicate over QUIC. State is propagated via gossip (no leader, no consensus).
@@ -39,15 +39,23 @@ cd gateway && bun run index.ts
 | Script | Purpose |
 |--------|---------|
 | `tools/train_alpha.py` | Fit BM25/vector fusion weights from 100 labeled queries (no API). Outputs `WEIGHTS`/`BIAS` constants for `query_features.rs`. |
-| `tools/benchmark.py` | Benchmark Nexus vs Tantivy on the crates.io corpus (MRR@10, Hits@1, QPS). |
+| `tools/benchmark.py` | Benchmark Nexus vs Tantivy on the crates.io corpus (MRR@10, Hits@1, QPS). Two suites: named-entity retrieval (crate name = query) and 25 hand-labeled natural-language queries. |
 
 ```bash
 # Train QPP weights
 python3 tools/train_alpha.py
 
-# Benchmark (requires Nexus running on localhost:3000, or --no-nexus for Tantivy only)
-python3 tools/benchmark.py --skip-download --no-nexus
+# Benchmark — Tantivy only (no Nexus node required)
+python3 tools/benchmark.py --no-nexus
+
+# Benchmark — Nexus + Tantivy (Nexus must be running on localhost:3000)
+python3 tools/benchmark.py --skip-fetch
+
+# Smaller run for quick iteration
+python3 tools/benchmark.py --no-nexus --corpus-size 500 --query-size 50
 ```
+
+Dependencies: `pip install requests tantivy tqdm`
 
 ## Docs
 
