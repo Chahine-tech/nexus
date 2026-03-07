@@ -229,6 +229,7 @@ def search_nexus(nexus_url: str, query: str, limit: int, docid_to_name: dict[int
 # Each entry: (query, expected_crate_name)
 # Expected crate must be present in the corpus (top 2000 by downloads).
 NL_QUERIES: list[tuple[str, str]] = [
+    # --- original 25 ---
     ("async runtime tokio",                  "tokio"),
     ("serialize deserialize json",            "serde"),
     ("serialize deserialize",                 "serde_json"),
@@ -254,6 +255,68 @@ NL_QUERIES: list[tuple[str, str]] = [
     ("image processing",                     "image"),
     ("csv parsing reading",                  "csv"),
     ("database sqlite",                      "rusqlite"),
+    # --- networking / protocols ---
+    ("websocket client server",              "tokio-tungstenite"),
+    ("grpc protocol buffers",               "tonic"),
+    ("tls certificate rustls",               "rustls"),
+    ("dns resolution async",                 "hickory-resolver"),
+    ("http server framework",                "axum"),
+    ("mime type detection",                  "mime"),
+    ("network protocol encoding",            "bytes"),
+    # --- data formats ---
+    ("yaml configuration file",             "serde_yaml"),
+    ("xml parsing serialization",           "quick-xml"),
+    ("json schema validation",              "jsonschema"),
+    ("messagepack binary serialization",    "rmp-serde"),
+    ("protobuf encoding decoding",          "prost"),
+    ("arrow columnar format",               "arrow"),
+    # --- async / concurrency ---
+    ("channel message passing async",       "tokio"),
+    ("actor model concurrency",             "actix"),
+    ("async stream processing",             "futures"),
+    ("mutex read write lock async",         "tokio"),
+    ("thread pool work stealing",           "rayon"),
+    ("semaphore rate limiting",             "tokio"),
+    # --- CLI / terminal ---
+    ("progress bar terminal",               "indicatif"),
+    ("terminal table formatting",           "comfy-table"),
+    ("interactive prompt readline",         "rustyline"),
+    ("ansi color terminal styling",         "colored"),
+    ("argument parser derive macros",       "clap"),
+    # --- cryptography / security ---
+    ("hmac message authentication",         "hmac"),
+    ("aes encryption symmetric",            "aes"),
+    ("rsa public key cryptography",         "rsa"),
+    ("password hashing bcrypt argon",       "argon2"),
+    ("random secure bytes generation",      "rand"),
+    ("certificate tls x509",               "rcgen"),
+    # --- database / storage ---
+    ("orm query builder diesel",            "diesel"),
+    ("postgres async driver",               "tokio-postgres"),
+    ("key value embedded store",            "rocksdb"),
+    ("redis client async",                  "redis"),
+    ("connection pool database",            "bb8"),
+    ("migration schema database",           "diesel"),
+    # --- text / parsing ---
+    ("string diff patch",                   "similar"),
+    ("unicode normalization",               "unicode-normalization"),
+    ("markdown html rendering",             "pulldown-cmark"),
+    ("template engine html",               "tera"),
+    ("natural language tokenizer",          "rust-stemmers"),
+    ("fuzzy string matching",               "fuzzy-matcher"),
+    # --- system / OS ---
+    ("file system watch events",            "notify"),
+    ("cross platform path handling",        "dunce"),
+    ("process spawn command execution",     "tokio"),
+    ("environment variables config",        "dotenvy"),
+    ("memory mapped files",                 "memmap2"),
+    ("signal handling unix",               "signal-hook"),
+    # --- testing / dev tools ---
+    ("property based testing",              "proptest"),
+    ("mock http server testing",            "wiremock"),
+    ("fake test data generation",           "rand"),
+    ("snapshot testing assertions",        "insta"),
+    ("benchmarking performance",            "criterion"),
 ]
 
 # ---------------------------------------------------------------------------

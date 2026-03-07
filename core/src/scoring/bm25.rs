@@ -86,38 +86,56 @@ impl Bm25Scorer {
 
     /// BM25 score for `doc_id` against a multi-term query, summed across all fields.
     ///
-    ///   IDF(t,field)      = ln((N - df + 0.5) / (df + 0.5) + 1)
-    ///   TF_norm(t,d,field) = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl_field))
-    ///   score(q, d)        = Σ_field [ boost * Σ_t [ IDF * TF_norm ] ]
+    /// BM25F formula (Robertson et al.):
+    ///   pseudo_tf(t, d, field) = boost_field * tf_field
+    ///                            ─────────────────────────────────────────────────────
+    ///                            1 - b + b * dl_field / avgdl_field
+    ///
+    ///   tf_combined(t, d)      = Σ_field [ pseudo_tf(t, d, field) ]
+    ///
+    ///   TF_norm(t, d)          = tf_combined * (k1 + 1) / (k1 + tf_combined)
+    ///
+    ///   IDF(t)                 = ln((N - df + 0.5) / (df + 0.5) + 1)
+    ///                            where df = max document frequency across fields
+    ///
+    ///   score(q, d)            = Σ_term [ IDF(t) * TF_norm(t, d) ]
+    ///
+    /// Key difference from per-field BM25: the k1 saturation is applied once after
+    /// combining boosted TFs across fields, preventing over-saturation when a term
+    /// appears in multiple fields.
     pub fn score(&self, doc_id: u32, terms: &[String]) -> f32 {
         let n = self.effective_n();
         let k1 = self.params.k1;
         let b = self.params.b;
 
-        self.fields
+        terms
             .iter()
-            .map(|field| {
-                let avgdl = field.index.avg_doc_len();
-                let dl = field.index.total_tokens_in_doc(doc_id) as f32;
-
-                let field_score: f32 = terms
-                    .iter()
-                    .filter_map(|term| {
+            .map(|term| {
+                // Single pass over fields: accumulate tf_combined and max df together.
+                let (tf_combined, df) = self.fields.iter().fold(
+                    (0.0_f32, 0.0_f32),
+                    |(tf_acc, df_acc), field| {
+                        let avgdl = field.index.avg_doc_len();
+                        let dl = field.index.total_tokens_in_doc(doc_id) as f32;
                         field.index.with_posting(term, |pl| {
-                            let df = pl.len() as f32;
                             let tf = pl.tf(doc_id) as f32;
-                            if tf == 0.0 {
-                                return 0.0;
-                            }
-                            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-                            let tf_norm =
-                                (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * dl / avgdl));
-                            idf * tf_norm
-                        })
-                    })
-                    .sum();
+                            let pseudo_tf = if tf > 0.0 {
+                                field.boost * tf / (1.0 - b + b * dl / avgdl)
+                            } else {
+                                0.0
+                            };
+                            (tf_acc + pseudo_tf, df_acc.max(pl.len() as f32))
+                        }).unwrap_or((tf_acc, df_acc))
+                    },
+                );
 
-                field.boost * field_score
+                if tf_combined == 0.0 {
+                    return 0.0;
+                }
+
+                let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+                let tf_norm = tf_combined * (k1 + 1.0) / (k1 + tf_combined);
+                idf * tf_norm
             })
             .sum()
     }
