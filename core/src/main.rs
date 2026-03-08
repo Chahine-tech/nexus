@@ -79,7 +79,15 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(InvertedIndex::new())
         }
     };
+    let vector_dir = PathBuf::from(&data_dir);
     let search_node = Arc::new(Node::from_index(index));
+
+    // Try to restore a previously saved vector index from disk.
+    match search_node.try_load_vector_index(&vector_dir).await {
+        Ok(true) => tracing::info!("vector index restored from disk"),
+        Ok(false) => tracing::info!("no saved vector index found"),
+        Err(e) => tracing::warn!(error = %e, "failed to load vector index"),
+    }
 
     let query_router = Arc::new(QueryRouter::new(
         Arc::clone(&search_node),
@@ -253,6 +261,10 @@ async fn main() -> anyhow::Result<()> {
 
                     if let Err(e) = crawl_node.rebuild_vector_index().await {
                         tracing::warn!(error = %e, "vector index rebuild failed");
+                    } else if let Err(e) = crawl_node.save_vector_index(crawl_path.parent().unwrap_or(std::path::Path::new("."))).await {
+                        tracing::warn!(error = %e, "vector index persist failed");
+                    } else {
+                        tracing::info!("vector index persisted to disk");
                     }
 
                     let iters = crawl_node.run_pagerank(100);
@@ -355,6 +367,7 @@ async fn main() -> anyhow::Result<()> {
         node: search_node,
         gossip: Arc::clone(&gossip),
         routing_table: Arc::clone(&routing_table),
+        data_dir: PathBuf::from(&data_dir),
     });
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
     tracing::info!(addr = %listener.local_addr()?, "HTTP server listening");

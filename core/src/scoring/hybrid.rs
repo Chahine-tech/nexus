@@ -8,10 +8,11 @@ use crate::scoring::vector::VectorIndex;
 
 /// Combines BM25 keyword scoring with approximate nearest-neighbour vector scoring.
 ///
-/// `score = alpha * normalize(bm25) + (1 - alpha) * cosine_similarity`
+/// `score = (1 - gamma) * [alpha * normalize(bm25) + (1 - alpha) * cosine] + gamma * normalize(pagerank)`
 ///
 /// BM25 scores are min-max normalized across the merged candidate set before
 /// combining, so that both signals are in the same [0, 1] range.
+/// PageRank is log-normalized and blended as a small fixed-weight popularity signal.
 pub struct HybridScorer {
     bm25: Bm25Scorer,
     vector: Arc<VectorIndex>,
@@ -42,11 +43,22 @@ impl HybridScorer {
     ///
     /// Candidate set = union of BM25 hits and ANN vector hits (each over-fetched by 4×).
     /// BM25 scores are min-max normalized before linear combination with cosine similarity.
+    #[allow(dead_code)]
     pub fn search(&self, terms: &[String], limit: usize) -> Vec<(u32, f32)> {
+        self.search_with_pagerank(terms, limit, None)
+    }
+
+    /// Like `search()` but also blends PageRank as a popularity signal.
+    pub fn search_with_pagerank(
+        &self,
+        terms: &[String],
+        limit: usize,
+        pagerank: Option<&HashMap<u32, f32>>,
+    ) -> Vec<(u32, f32)> {
         let fetch = (limit * 4).max(20);
         let bm25_hits = self.bm25.search(terms, fetch);
         let vec_hits = self.vector.search(&terms.join(" "), fetch);
-        hybrid_combine(bm25_hits, vec_hits, self.alpha, limit)
+        hybrid_combine(bm25_hits, vec_hits, self.alpha, pagerank, limit)
     }
 
     /// Like `search()` but infers alpha from query features (QPP-based fusion).
@@ -56,7 +68,19 @@ impl HybridScorer {
     /// the optimal BM25/vector blend for this specific query type.
     ///
     /// `raw_query` is the original unprocessed string. `terms` is post-tokenization.
+    #[allow(dead_code)]
     pub fn search_adaptive(&self, raw_query: &str, terms: &[String], limit: usize) -> Vec<(u32, f32)> {
+        self.search_adaptive_with_pagerank(raw_query, terms, limit, None)
+    }
+
+    /// Like `search_adaptive()` but also blends PageRank as a popularity signal.
+    pub fn search_adaptive_with_pagerank(
+        &self,
+        raw_query: &str,
+        terms: &[String],
+        limit: usize,
+        pagerank: Option<&HashMap<u32, f32>>,
+    ) -> Vec<(u32, f32)> {
         // Use the last field (body) for IDF features — it has the richest term distribution.
         let feature_index = self.bm25.fields.last().map(|f| &*f.index)
             .unwrap_or_else(|| &*self.bm25.fields[0].index);
@@ -66,19 +90,27 @@ impl HybridScorer {
         let fetch = (limit * 4).max(20);
         let bm25_hits = self.bm25.search(terms, fetch);
         let vec_hits = self.vector.search(raw_query, fetch);
-        hybrid_combine(bm25_hits, vec_hits, alpha, limit)
+        hybrid_combine(bm25_hits, vec_hits, alpha, pagerank, limit)
     }
 }
 
 /// Merges BM25 hits and vector ANN hits into a single ranked list.
 ///
 /// BM25 scores are min-max normalized across the merged candidate set before
-/// the linear combination `alpha * bm25_norm + (1 - alpha) * cosine`.
+/// the linear combination. When PageRank scores are provided they are blended
+/// as a small popularity signal:
+///
+/// `score = (1 - gamma) * [alpha * bm25_norm + (1 - alpha) * cosine] + gamma * pr_norm`
+///
+/// where `gamma = 0.1` and PageRank is log-normalized across the candidate set.
+/// If no PageRank is provided (or no candidate has a non-zero score), `gamma = 0`.
+///
 /// Exported so `Node::search_hybrid` can reuse it without duplicating logic.
 pub fn hybrid_combine(
     bm25_hits: Vec<(u32, f32)>,
     vec_hits: Vec<(u32, f32)>,
     alpha: f32,
+    pagerank: Option<&HashMap<u32, f32>>,
     limit: usize,
 ) -> Vec<(u32, f32)> {
     if limit == 0 || (bm25_hits.is_empty() && vec_hits.is_empty()) {
@@ -98,12 +130,41 @@ pub fn hybrid_combine(
     let bm25_max = bm25_values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let bm25_range = bm25_max - bm25_min;
 
+    // Build log-normalized PageRank scores for the candidate set.
+    // log1p dampens the heavy-tailed PageRank distribution before min-max normalization.
+    const GAMMA: f32 = 0.1;
+    let pr_norm_map: Option<HashMap<u32, f32>> = pagerank.and_then(|pr| {
+        let log_values: Vec<(u32, f32)> = scores
+            .keys()
+            .map(|id| (*id, pr.get(id).copied().unwrap_or(0.0).ln_1p()))
+            .collect();
+        let pr_min = log_values.iter().map(|(_, v)| *v).fold(f32::INFINITY, f32::min);
+        let pr_max = log_values.iter().map(|(_, v)| *v).fold(f32::NEG_INFINITY, f32::max);
+        let pr_range = pr_max - pr_min;
+        if pr_range <= 0.0 {
+            return None; // all zeros — skip blending
+        }
+        Some(
+            log_values
+                .into_iter()
+                .map(|(id, v)| (id, (v - pr_min) / pr_range))
+                .collect(),
+        )
+    });
+
     let mut ranked: Vec<(u32, f32)> = scores
         .into_iter()
         .map(|(doc_id, (bm25, cosine))| {
             let bm25_norm =
                 if bm25_range > 0.0 { (bm25 - bm25_min) / bm25_range } else { 0.0 };
-            (doc_id, alpha * bm25_norm + (1.0 - alpha) * cosine)
+            let relevance = alpha * bm25_norm + (1.0 - alpha) * cosine;
+            let score = if let Some(ref pr_map) = pr_norm_map {
+                let pr = pr_map.get(&doc_id).copied().unwrap_or(0.0);
+                (1.0 - GAMMA) * relevance + GAMMA * pr
+            } else {
+                relevance
+            };
+            (doc_id, score)
         })
         .collect();
 
@@ -132,14 +193,14 @@ mod tests {
 
     #[test]
     fn test_hybrid_combine_empty_inputs() {
-        let result = hybrid_combine(vec![], vec![], 0.5, 10);
+        let result = hybrid_combine(vec![], vec![], 0.5, None, 10);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_hybrid_combine_bm25_only() {
         let bm25_hits = vec![(0u32, 2.0), (1u32, 1.0)];
-        let result = hybrid_combine(bm25_hits, vec![], 1.0, 10);
+        let result = hybrid_combine(bm25_hits, vec![], 1.0, None, 10);
         // alpha=1.0: pure BM25. BM25 min-max normalized — doc 0 scores highest.
         assert_eq!(result[0].0, 0);
         assert!(result[0].1 > result[1].1);
@@ -148,7 +209,7 @@ mod tests {
     #[test]
     fn test_hybrid_combine_vector_only() {
         let vec_hits = vec![(0u32, 0.9), (1u32, 0.5)];
-        let result = hybrid_combine(vec![], vec_hits, 0.0, 10);
+        let result = hybrid_combine(vec![], vec_hits, 0.0, None, 10);
         // alpha=0.0: pure vector. Doc 0 has highest cosine sim.
         assert_eq!(result[0].0, 0);
     }
@@ -156,17 +217,28 @@ mod tests {
     #[test]
     fn test_hybrid_combine_limit_respected() {
         let bm25_hits = vec![(0u32, 3.0), (1u32, 2.0), (2u32, 1.0)];
-        let result = hybrid_combine(bm25_hits, vec![], 1.0, 2);
+        let result = hybrid_combine(bm25_hits, vec![], 1.0, None, 2);
         assert!(result.len() <= 2);
     }
 
     #[test]
     fn test_hybrid_combine_sorted_descending() {
         let bm25_hits = vec![(0u32, 1.0), (1u32, 3.0), (2u32, 2.0)];
-        let result = hybrid_combine(bm25_hits, vec![], 1.0, 10);
+        let result = hybrid_combine(bm25_hits, vec![], 1.0, None, 10);
         for window in result.windows(2) {
             assert!(window[0].1 >= window[1].1);
         }
+    }
+
+    #[test]
+    fn test_hybrid_combine_pagerank_boosts_popular_doc() {
+        // Doc 0 and Doc 1 have equal BM25 — PageRank should break the tie in favour of doc 1.
+        let bm25_hits = vec![(0u32, 1.0), (1u32, 1.0)];
+        let mut pr: HashMap<u32, f32> = HashMap::new();
+        pr.insert(0, 0.1);
+        pr.insert(1, 0.9);
+        let result = hybrid_combine(bm25_hits, vec![], 1.0, Some(&pr), 10);
+        assert_eq!(result[0].0, 1, "doc 1 should rank first due to higher PageRank");
     }
 
     // -----------------------------------------------------------------------

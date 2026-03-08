@@ -289,11 +289,20 @@ impl Node {
         let body_idx = Arc::clone(&self.body_index);
         let hybrid_alpha = self.hybrid_alpha;
 
+        // Snapshot PageRank scores before spawn_blocking (RwLockReadGuard is !Send).
+        let pr_scores: std::collections::HashMap<u32, f32> = {
+            let guard = self.pagerank.read().expect("pagerank RwLock poisoned");
+            guard.scores_snapshot()
+        };
+        // Only pass PageRank if at least one doc has a non-zero score.
+        let has_pagerank = pr_scores.values().any(|&v| v > 0.0);
+
         tokio::task::spawn_blocking(move || {
+            let pr = if has_pagerank { Some(&pr_scores) } else { None };
             if hybrid_alpha == 0.5 {
                 // No explicit alpha — let QPP predict the optimal blend.
                 HybridScorer::with_fields(name_idx, body_idx, vi)
-                    .search_adaptive(&query_owned, &terms, limit)
+                    .search_adaptive_with_pagerank(&query_owned, &terms, limit, pr)
             } else {
                 // Explicit alpha set via NEXUS_HYBRID_ALPHA — honour it.
                 HybridScorer::new(
@@ -301,11 +310,52 @@ impl Node {
                     vi,
                     hybrid_alpha,
                 )
-                .search(&terms, limit)
+                .search_with_pagerank(&terms, limit, pr)
             }
         })
         .await
         .expect("spawn_blocking panicked")
+    }
+
+    /// Saves the current HNSW vector index to `<dir>/vector` (two files: `.hnsw.graph` + `.hnsw.data`).
+    ///
+    /// No-op (returns `Ok(())`) if the vector index has not been built yet.
+    /// Blocking operations run on the blocking thread pool.
+    #[instrument(skip(self))]
+    pub async fn save_vector_index(&self, dir: &std::path::Path) -> Result<(), VectorError> {
+        let vi: Option<Arc<VectorIndex>> = {
+            let guard = self.vector.read().expect("vector RwLock poisoned");
+            guard.as_ref().map(Arc::clone)
+        };
+        let Some(vi) = vi else {
+            tracing::debug!("vector index not built, skipping save");
+            return Ok(());
+        };
+        let dir = dir.to_path_buf();
+        tokio::task::spawn_blocking(move || vi.save(&dir, "vector"))
+            .await
+            .expect("spawn_blocking panicked")
+    }
+
+    /// Tries to load a previously saved HNSW vector index from `<dir>/vector`.
+    ///
+    /// Returns `Ok(true)` if the index was loaded, `Ok(false)` if no saved index exists.
+    /// Blocking operations (model init + file I/O) run on the blocking thread pool.
+    #[instrument(skip(self))]
+    pub async fn try_load_vector_index(&self, dir: &std::path::Path) -> Result<bool, VectorError> {
+        let dir = dir.to_path_buf();
+        let result = tokio::task::spawn_blocking(move || VectorIndex::load(&dir, "vector"))
+            .await
+            .expect("spawn_blocking panicked");
+        match result {
+            Ok(vi) => {
+                *self.vector.write().expect("vector RwLock poisoned") = Some(Arc::new(vi));
+                tracing::info!("vector index loaded from disk");
+                Ok(true)
+            }
+            Err(VectorError::NotFound(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     // -----------------------------------------------------------------------

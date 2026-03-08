@@ -29,6 +29,8 @@ pub struct AppState {
     pub node: Arc<Node>,
     pub gossip: Arc<GossipEngine>,
     pub routing_table: Arc<Mutex<RoutingTable>>,
+    /// Directory where persistent data (index, vector index) is stored.
+    pub data_dir: std::path::PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -257,16 +259,19 @@ async fn index_handler(
 /// Blocks until the rebuild is complete (fastembed batch embed + HNSW insert).
 /// Returns 200 OK with the number of documents embedded.
 async fn rebuild_vector_handler(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    match state.node.rebuild_vector_index().await {
-        Ok(()) => {
-            let doc_count = state.node.doc_count();
-            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "docs_embedded": doc_count })))
-        }
-        Err(e) => (
+    if let Err(e) = state.node.rebuild_vector_index().await {
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
-        ),
+        );
     }
+    if let Err(e) = state.node.save_vector_index(&state.data_dir).await {
+        tracing::warn!(error = %e, "vector index persist failed after rebuild");
+    } else {
+        tracing::info!("vector index persisted to disk after rebuild");
+    }
+    let doc_count = state.node.doc_count();
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true, "docs_embedded": doc_count })))
 }
 
 #[derive(Deserialize)]
