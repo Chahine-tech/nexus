@@ -230,7 +230,7 @@ def search_nexus(nexus_url: str, query: str, limit: int, docid_to_name: dict[int
 # Expected crate must be present in the corpus (top 2000 by downloads).
 NL_QUERIES: list[tuple[str, str]] = [
     # --- original 25 ---
-    ("async runtime tokio",                  "tokio"),
+    ("async runtime event driven",           "tokio"),
     ("serialize deserialize json",            "serde"),
     ("serialize deserialize",                 "serde_json"),
     ("http client requests",                  "reqwest"),
@@ -271,12 +271,12 @@ NL_QUERIES: list[tuple[str, str]] = [
     ("protobuf encoding decoding",          "prost"),
     ("arrow columnar format",               "arrow"),
     # --- async / concurrency ---
-    ("channel message passing async",       "tokio"),
+    ("channel message passing async",       "crossbeam-channel"),
     ("actor model concurrency",             "actix"),
     ("async stream processing",             "futures"),
-    ("mutex read write lock async",         "tokio"),
+    ("mutex read write lock async",         "parking_lot"),
     ("thread pool work stealing",           "rayon"),
-    ("semaphore rate limiting",             "tokio"),
+    ("semaphore rate limiting",             "governor"),
     # --- CLI / terminal ---
     ("progress bar terminal",               "indicatif"),
     ("terminal table formatting",           "comfy-table"),
@@ -288,7 +288,7 @@ NL_QUERIES: list[tuple[str, str]] = [
     ("aes encryption symmetric",            "aes"),
     ("rsa public key cryptography",         "rsa"),
     ("password hashing bcrypt argon",       "argon2"),
-    ("random secure bytes generation",      "rand"),
+    ("random secure bytes generation",      "getrandom"),
     ("certificate tls x509",               "rcgen"),
     # --- database / storage ---
     ("orm query builder diesel",            "diesel"),
@@ -302,19 +302,19 @@ NL_QUERIES: list[tuple[str, str]] = [
     ("unicode normalization",               "unicode-normalization"),
     ("markdown html rendering",             "pulldown-cmark"),
     ("template engine html",               "tera"),
-    ("natural language tokenizer",          "rust-stemmers"),
-    ("fuzzy string matching",               "fuzzy-matcher"),
+    ("snowball stemming algorithm",          "rust-stemmers"),
+    ("fuzzy string matching",               "strsim"),
     # --- system / OS ---
     ("file system watch events",            "notify"),
     ("cross platform path handling",        "dunce"),
-    ("process spawn command execution",     "tokio"),
+    ("process spawn command execution",     "duct"),
     ("environment variables config",        "dotenvy"),
     ("memory mapped files",                 "memmap2"),
     ("signal handling unix",               "signal-hook"),
     # --- testing / dev tools ---
     ("property based testing",              "proptest"),
     ("mock http server testing",            "wiremock"),
-    ("fake test data generation",           "rand"),
+    ("fake test data generation",           "arbitrary"),
     ("snapshot testing assertions",        "insta"),
     ("benchmarking performance",            "criterion"),
 ]

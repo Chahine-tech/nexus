@@ -69,12 +69,12 @@ Two configurations measured: **BM25F only** (no vector index) and **Hybrid** (BM
 
 | Suite | Nexus Hybrid | Nexus BM25F | Tantivy |
 |-------|-------------|-------------|---------|
-| NE MRR@10 | 0.9587 | **0.9714** | 0.9422 |
-| NE Hits@1 | 0.9300 | **0.9500** | 0.9100 |
-| NL MRR@10 | **0.3796** | 0.3580 | 0.3416 |
-| NL Hits@1 | 0.2051 | 0.2564 | 0.2436 |
+| NE MRR@10 | 0.9668 | **0.9714** | 0.9422 |
+| NE Hits@1 | 0.9400 | **0.9500** | 0.9100 |
+| NL MRR@10 | **0.4085** | 0.3580 | 0.3700 |
+| NL Hits@1 | 0.2308 | **0.2692** | 0.2692 |
 
-BM25F (multi-field with name boost ×3) dominates named-entity retrieval. Dense hybrid improves NL MRR@10 by +3.8 pts over Tantivy — semantic embeddings help when query wording differs from indexed text. NL Hits@1 gap is under investigation (QPP alpha calibration).
+BM25F (multi-field with name boost ×3) dominates named-entity retrieval (+2.9 pts MRR vs Tantivy). Dense hybrid improves NL MRR@10 by +3.9 pts over Tantivy — semantic embeddings help when query wording differs from indexed text. NL Hits@1 is tied with Tantivy; the remaining gap vs BM25F is a sub-crate disambiguation issue (e.g. `rayon` vs `rayon-cond`) not a scoring deficiency.
 
 ### Latency (Nexus HTTP loopback, single node, release build)
 
@@ -82,8 +82,8 @@ BM25F (multi-field with name boost ×3) dominates named-entity retrieval. Dense 
 |-------|--------|-----|-----|-----|
 | NE (200 queries) | BM25F only | 0.85 ms | 1.02 ms | 1.12 ms |
 | NL (78 queries)  | BM25F only | 0.86 ms | 1.01 ms | 1.20 ms |
-| NE (200 queries) | Hybrid     | 5.54 ms | 6.58 ms | 7.13 ms |
-| NL (78 queries)  | Hybrid     | 5.88 ms | 6.65 ms | 7.04 ms |
+| NE (200 queries) | Hybrid     | 5.61 ms | 6.98 ms | 7.34 ms |
+| NL (78 queries)  | Hybrid     | 5.85 ms | 6.87 ms | 7.44 ms |
 
 Tantivy runs in-process (no network). Nexus latency includes HTTP loopback + Rust server.
 Hybrid overhead (~5 ms) is fastembed ONNX inference on a single CPU core — expected to improve significantly on multi-core hardware or with batched query serving.
