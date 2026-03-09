@@ -312,6 +312,7 @@ async fn main() -> anyhow::Result<()> {
     let gossip_loop = {
         let gossip = Arc::clone(&gossip);
         let gossip_node = Arc::clone(&search_node);
+        let gossip_table = Arc::clone(&routing_table);
         let local_id = local_id.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
@@ -339,21 +340,28 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or_default()
                         .as_secs(),
                 });
-                tracing::debug!(
-                    peers = gossip.peer_states().len(),
-                    "gossip tick"
-                );
 
-                // Broadcast doc-count heartbeat and IDF sketch to known peers.
-                // peer_states() only carries GossipState (no addr) — broadcast to empty
-                // peer list wires the method and is a no-op at the network level.
-                if let Err(e) = gossip.broadcast(&[]).await {
+                // Collect peer addresses from the routing table for gossip broadcast.
+                let peer_addrs: Vec<SocketAddr> = gossip_table
+                    .lock()
+                    .map(|table| {
+                        table.closest_nodes(&local_id, 20)
+                            .into_iter()
+                            .map(|n| n.addr)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                tracing::debug!(peers = peer_addrs.len(), "gossip tick");
+
+                // Broadcast doc-count heartbeat and IDF sketch to all known peers.
+                if let Err(e) = gossip.broadcast(&peer_addrs).await {
                     tracing::warn!(error = %e, "gossip broadcast failed");
                 }
-                if let Err(e) = gossip.broadcast_idf(&[]).await {
+                if let Err(e) = gossip.broadcast_idf(&peer_addrs).await {
                     tracing::warn!(error = %e, "IDF gossip broadcast failed");
                 }
-                if let Err(e) = gossip.broadcast_pagerank(&[]).await {
+                if let Err(e) = gossip.broadcast_pagerank(&peer_addrs).await {
                     tracing::warn!(error = %e, "PageRank gossip broadcast failed");
                 }
             }
