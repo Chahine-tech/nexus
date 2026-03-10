@@ -26,19 +26,19 @@ static STOP_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 // Positive weight → feature pushes alpha toward 1.0 (BM25 dominant = lexical query).
 // Negative weight → feature pushes alpha toward 0.0 (vector dominant = semantic query).
 //
-// Trained on 100 hand-labeled queries via tools/train_alpha.py (no API calls).
+// Trained on 115 hand-labeled queries via tools/train_alpha.py (no API calls).
 // 5-fold CV accuracy: 0.890. All directional sanity checks pass.
 // Re-run tools/train_alpha.py to retrain after adding queries to the dataset.
 
 const WEIGHTS: [f32; 6] = [
-    -5.3486, // x[0] query_len_norm      — longer queries → more semantic → lower alpha
-    -0.0021, // x[1] avg_idf_norm        — near-zero: approximated without real index
+    -5.4834, // x[0] query_len_norm      — longer queries → more semantic → lower alpha
+    -0.0692, // x[1] avg_idf_norm        — near-zero: approximated without real index
      0.0000, // x[2] idf_variance_norm   — near-zero: approximated without real index
-     3.8896, // x[3] has_code_token      — code token → lexical → higher alpha
-    -7.1896, // x[4] stop_word_ratio     — natural language → lower alpha
-    -0.7804, // x[5] token_entropy_norm  — diverse lengths → semantic → lower alpha
+     3.9112, // x[3] has_code_token      — code token → lexical → higher alpha
+    -7.8054, // x[4] stop_word_ratio     — natural language → lower alpha
+    -0.7509, // x[5] token_entropy_norm  — diverse lengths → semantic → lower alpha
 ];
-const BIAS: f32 = 2.3614;
+const BIAS: f32 = 2.4375;
 
 // ---------------------------------------------------------------------------
 // QueryFeatures

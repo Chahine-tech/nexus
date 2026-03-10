@@ -7,3 +7,4 @@ __pycache__/
 # fastembed model cache (~130 MB ONNX weights, downloaded at runtime)
 .fastembed_cache/
 .cache/
+data

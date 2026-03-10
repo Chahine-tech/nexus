@@ -137,6 +137,23 @@ DATASET = [
     ("what is the newtype pattern used for",                ["newtype", "pattern", "used"],                            0.20),
     ("how to share state between tokio tasks",              ["share", "state", "between", "tokio", "tasks"],           0.20),
 
+    # --- Natural language (continued) — more semantic diversity ---
+    ("what is the best way to do zero copy deserialization",    ["best", "zero", "copy", "deserialization"],               0.20),
+    ("how to expose a rust library to python",                  ["expose", "rust", "library", "python"],                   0.18),
+    ("when is unsafe code justified",                           ["unsafe", "code", "justified"],                           0.20),
+    ("how to build a plugin system in rust",                    ["build", "plugin", "system", "rust"],                     0.22),
+    ("difference between future and stream",                    ["difference", "between", "future", "stream"],             0.18),
+    ("why does my async code block the executor",               ["async", "code", "block", "executor"],                    0.20),
+    ("how to reduce binary size in release mode",               ["reduce", "binary", "size", "release", "mode"],           0.18),
+    ("what is the difference between clone and copy",           ["difference", "between", "clone", "copy"],                0.16),
+    ("how to implement custom iterator adapters",               ["implement", "custom", "iterator", "adapters"],           0.20),
+    ("when to use an arena allocator",                          ["use", "arena", "allocator"],                             0.18),
+    ("how to model a domain with algebraic types",              ["model", "domain", "algebraic", "types"],                 0.17),
+    ("explain the difference between box rc and arc",           ["explain", "difference", "between", "box", "rc", "arc"],  0.15),
+    ("how to write a compiler frontend in rust",                ["write", "compiler", "frontend", "rust"],                 0.22),
+    ("what are the limits of the type system",                  ["limits", "type", "system"],                              0.18),
+    ("how to avoid unnecessary heap allocations",               ["avoid", "unnecessary", "heap", "allocations"],           0.20),
+
     # --- Mixed / hybrid queries → alpha ~0.40–0.60 ---
     ("tokio async runtime",                 ["tokio", "async", "runtime"],                          0.55),
     ("rust error handling Result",          ["rust", "error", "handling", "result"],                0.50),
@@ -242,7 +259,7 @@ def extract_features(raw_query: str, tokens: list[str], doc_count: int = DOC_COU
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    print(f"Dataset size: {len(DATASET)} queries\n")
+    print(f"Dataset size: {len(DATASET)} queries ({sum(1 for _,_,a in DATASET if a > 0.5)} lexical / {sum(1 for _,_,a in DATASET if a <= 0.5 and a >= 0.4)} hybrid / {sum(1 for _,_,a in DATASET if a < 0.4)} semantic)\n")
 
     X = np.array([extract_features(r, t) for r, t, _ in DATASET])
     y_continuous = np.array([label for _, _, label in DATASET])

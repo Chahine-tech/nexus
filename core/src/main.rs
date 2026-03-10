@@ -63,6 +63,9 @@ async fn main() -> anyhow::Result<()> {
     let reputation = Arc::new(ReputationStore::new());
     let routing_table = Arc::new(Mutex::new(RoutingTable::new(local_id.clone())));
 
+    // Ensure data directory exists before any disk I/O.
+    std::fs::create_dir_all(&data_dir)?;
+
     // Load existing index from disk, or start fresh.
     let data_path = PathBuf::from(&data_dir).join("index.msgpack");
     let index = match storage::load(&data_path) {

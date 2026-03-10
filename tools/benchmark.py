@@ -317,6 +317,24 @@ NL_QUERIES: list[tuple[str, str]] = [
     ("fake test data generation",           "arbitrary"),
     ("snapshot testing assertions",        "insta"),
     ("benchmarking performance",            "criterion"),
+    # --- observability / diagnostics ---
+    ("metrics prometheus exporter",         "metrics-exporter-prometheus"),
+    ("distributed tracing opentelemetry",   "opentelemetry"),
+    ("flame graph profiling",               "pprof"),
+    ("health check liveness probe",         "axum"),
+    # --- FFI / unsafe / interop ---
+    ("c ffi bindings unsafe",               "libc"),
+    ("python rust bindings pyo3",           "pyo3"),
+    ("wasm webassembly target",             "wasm-bindgen"),
+    ("bindgen generate c bindings",         "bindgen"),
+    # --- no_std / embedded ---
+    ("no std embedded bare metal",          "cortex-m"),
+    ("heapless fixed capacity collections", "heapless"),
+    # --- proc macros / codegen ---
+    ("procedural macro derive attribute",   "proc-macro2"),
+    ("code generation build script",        "build-script"),
+    ("quote syntax tree tokens",            "quote"),
+    ("syn parse rust source",               "syn"),
 ]
 
 # ---------------------------------------------------------------------------
