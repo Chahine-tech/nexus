@@ -80,7 +80,7 @@ function fetchShardEffect(
 	return Effect.tryPromise({
 		try: async () => {
 			const q = encodeURIComponent(terms.join(" "));
-			const res = await fetch(`${url}/search?q=${q}&limit=${limit}`, {
+			const res = await fetch(`${url}/search/local?q=${q}&limit=${limit}`, {
 				signal: AbortSignal.timeout(timeoutMs),
 			});
 			if (!res.ok) throw new NodeDeadError({ nodeId });

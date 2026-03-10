@@ -50,17 +50,17 @@ describe("planQuery", () => {
 		expect(plan.shards).toHaveLength(0);
 	});
 
-	test("groups terms by node — each term appears in exactly one shard", () => {
+	test("broadcasts full query to all live nodes", () => {
 		// Register two nodes for this test (shared singleton).
 		registry.registerFromRust(nodeA.nodeId, nodeA.url);
 		registry.registerFromRust(nodeB.nodeId, nodeB.url);
 
 		const plan = planQuery("rust async concurrency python");
 
-		// Every term should appear in exactly one shard (no duplicates).
-		const allTerms = plan.shards.flatMap((s) => s.terms);
-		const uniqueTerms = new Set(allTerms);
-		expect(uniqueTerms.size).toBe(allTerms.length);
-		expect(allTerms.sort()).toEqual(["async", "concurrency", "python", "rust"]);
+		// Every shard receives all query terms (broadcast, not term-sharded).
+		expect(plan.shards.length).toBeGreaterThanOrEqual(2);
+		for (const shard of plan.shards) {
+			expect(shard.terms.sort()).toEqual(["async", "concurrency", "python", "rust"]);
+		}
 	});
 });

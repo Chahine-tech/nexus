@@ -59,25 +59,9 @@ export function planQuery(query: string): QueryPlan {
 		return { shards: [], mergeStrategy: "rrf", timeoutMs: 150 };
 	}
 
-	// Group terms by responsible node using XOR consistent hashing.
-	const shardMap = new Map<NodeId, { url: string; terms: string[] }>();
-
-	for (const term of terms) {
-		const node = termToNode(term, nodes);
-		if (!node) continue;
-		const existing = shardMap.get(node.nodeId);
-		if (existing) {
-			existing.terms.push(term);
-		} else {
-			shardMap.set(node.nodeId, { url: node.url, terms: [term] });
-		}
-	}
-
-	const shards = [...shardMap.entries()].map(([nodeId, { url, terms }]) => ({
-		nodeId,
-		url,
-		terms,
-	}));
+	// Broadcast the full query to every live node and merge results via RRF.
+	// Each node searches its local shard independently; the gateway re-ranks.
+	const shards = nodes.map(({ nodeId, url }) => ({ nodeId, url, terms }));
 
 	return { shards, mergeStrategy: "rrf", timeoutMs: 150 };
 }

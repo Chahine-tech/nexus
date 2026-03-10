@@ -1,5 +1,5 @@
 # Builder stage — compiles the Rust binary
-FROM rust:bookworm AS builder
+FROM rust:trixie AS builder
 WORKDIR /build
 
 # Pre-warm the dependency cache: copy manifests + a stub main, build deps only.
@@ -14,8 +14,8 @@ COPY core/ core/
 RUN touch core/src/main.rs && cargo build --release -p nexus-core
 
 # Runtime stage — minimal image with only the binary
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y ca-certificates libstdc++6 && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/nexus /usr/local/bin/nexus
 
 EXPOSE 3001 9000
