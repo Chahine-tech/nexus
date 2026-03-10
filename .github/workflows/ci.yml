@@ -41,3 +41,39 @@ jobs:
       - name: Tests
         working-directory: gateway
         run: bun test
+
+  benchmark:
+    name: NL MRR regression guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install benchmark dependencies
+        run: pip install requests tantivy tqdm
+
+      - name: Run benchmark (Tantivy only)
+        run: |
+          python3 tools/benchmark.py --no-nexus --corpus-size 2000 2>&1 | tee /tmp/bench_output.txt
+
+      - name: Check NL MRR threshold
+        run: |
+          python3 - <<'EOF'
+          import re, sys
+          text = open("/tmp/bench_output.txt").read()
+          # Two MRR@10 lines: first = NE, second = NL (Tantivy only run).
+          matches = re.findall(r"MRR@10\s+([\d.]+)", text)
+          if len(matches) < 2:
+              print("ERROR: could not parse NL MRR@10 from benchmark output")
+              sys.exit(1)
+          mrr = float(matches[1])
+          threshold = 0.35
+          print(f"NL MRR@10 (Tantivy): {mrr:.4f}  threshold: {threshold}")
+          if mrr < threshold:
+              print(f"FAIL: NL MRR@10 {mrr:.4f} < {threshold} — regression detected")
+              sys.exit(1)
+          print("PASS")
+          EOF

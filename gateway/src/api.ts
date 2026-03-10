@@ -14,6 +14,7 @@ import { expandQuery } from "./services/QueryExpander";
 import { planQuery } from "./services/QueryPlanner";
 import { RAG_PROMPT, ragPipeline } from "./services/RagPipeline";
 import { rebalanceNode } from "./services/RebalanceService";
+import { rateLimiter } from "./services/RateLimiter";
 
 // Register rebalance hook once: when a node dies, transfer its shards.
 registry.onNodeDead((nodeId, url) => {
@@ -126,7 +127,15 @@ export const app = new Elysia()
 
 	.get(
 		"/search",
-		async ({ query }) => {
+		async ({ query, request, set }) => {
+			const ip =
+				request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+				"unknown";
+			if (!rateLimiter.check(ip)) {
+				set.status = 429;
+				return { error: "rate limit exceeded" };
+			}
+
 			const q = query.q ?? "";
 			const rawLimit = parseInt(query.limit ?? "10", 10);
 			const limit = Math.min(Number.isNaN(rawLimit) ? 10 : rawLimit, 100);
