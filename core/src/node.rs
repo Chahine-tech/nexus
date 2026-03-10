@@ -159,6 +159,12 @@ impl Node {
         self.doc_index.get(&doc_id).map(|v| v.clone())
     }
 
+    /// Tokenizes `text` using the node's tokenizer. Used by callers that need
+    /// the same token stream as indexing (e.g., to feed terms into the HLL sketch).
+    pub fn tokenize(&self, text: &str) -> Vec<String> {
+        self.tokenizer.tokenize(text)
+    }
+
     /// Tokenizes `text` and indexes it under `doc_id`.
     ///
     /// Also indexes into `body_index` so the multi-field scorer has candidates.

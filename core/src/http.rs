@@ -243,10 +243,20 @@ async fn index_handler(
     if url::Url::parse(&body.url).is_err() {
         return StatusCode::BAD_REQUEST;
     }
-    if let Some(name) = &body.name {
-        state.node.index_url_fields(&body.url, name, &body.body);
-    } else {
-        state.node.index_url(&body.url, &body.body);
+    let text_for_hll = match &body.name {
+        Some(name) => {
+            state.node.index_url_fields(&body.url, name, &body.body);
+            format!("{name} {}", body.body)
+        }
+        None => {
+            state.node.index_url(&body.url, &body.body);
+            body.body.clone()
+        }
+    };
+    // Feed new terms into the local HLL sketch immediately so estimated_global_terms
+    // reflects the current index without waiting for the 30s gossip tick.
+    for term in state.node.tokenize(&text_for_hll) {
+        state.gossip.add_term(&term);
     }
     // Sync local doc_count into gossip so global_doc_count() is accurate immediately.
     state.gossip.update_local(state.node.doc_count());
