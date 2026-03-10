@@ -161,7 +161,7 @@ impl Node {
 
     /// Tokenizes `text` using the node's tokenizer. Used by callers that need
     /// the same token stream as indexing (e.g., to feed terms into the HLL sketch).
-    pub fn tokenize(&self, text: &str) -> Vec<String> {
+    pub(crate) fn tokenize(&self, text: &str) -> Vec<String> {
         self.tokenizer.tokenize(text)
     }
 
