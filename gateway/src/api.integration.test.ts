@@ -55,7 +55,7 @@ function startMockNode(port: number, nodeId: string): MockNode {
 				return Response.json({ status: "ok" });
 			}
 
-			if (url.pathname === "/search") {
+			if (url.pathname === "/search" || url.pathname === "/search/local") {
 				const q = url.searchParams.get("q") ?? "";
 				const limit = parseInt(url.searchParams.get("limit") ?? "10", 10);
 				const terms = q.split(" ").filter(Boolean);
