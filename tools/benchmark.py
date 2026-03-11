@@ -200,11 +200,11 @@ def build_nexus_index(docs: list[dict], nexus_url: str) -> None:
     print(f"[nexus] {ok:,} OK, {errors} errors")
 
 
-def search_nexus(nexus_url: str, query: str, limit: int, docid_to_name: dict[int, str]) -> list[str]:
+def search_nexus(nexus_url: str, query: str, limit: int, docid_to_name: dict[int, str], rrf_k: int = 60) -> list[str]:
     try:
         resp = requests.get(
             f"{nexus_url}/search",
-            params={"q": query, "limit": limit},
+            params={"q": query, "limit": limit, "rrf_k": rrf_k},
             timeout=5,
         )
         if resp.status_code != 200:
@@ -353,6 +353,7 @@ def run_nl_benchmark(
     tantivy_index: tantivy.Index,
     nexus_url: Optional[str],
     docid_to_name: Optional[dict[int, str]] = None,
+    rrf_k: int = 60,
 ) -> dict:
     """Run the natural-language query set. Each query has one expected crate."""
     print(f"\n[nl-benchmark] Running {len(NL_QUERIES)} natural-language queries ...")
@@ -368,7 +369,7 @@ def run_nl_benchmark(
 
         if nexus_url:
             t0 = time.perf_counter()
-            nx_results = search_nexus(nexus_url, query, SEARCH_LIMIT, docid_to_name or {})
+            nx_results = search_nexus(nexus_url, query, SEARCH_LIMIT, docid_to_name or {}, rrf_k)
             nx_lat.append(time.perf_counter() - t0)
             nx_rr.append(reciprocal_rank(nx_results, expected))
 
@@ -402,6 +403,7 @@ def run_benchmark(
     tantivy_index: tantivy.Index,
     nexus_url: Optional[str],
     docid_to_name: Optional[dict[int, str]] = None,
+    rrf_k: int = 60,
 ) -> dict:
     print(f"\n[benchmark] Running {len(queries)} queries ...")
 
@@ -418,7 +420,7 @@ def run_benchmark(
 
         if nexus_url:
             t0 = time.perf_counter()
-            nx_results = search_nexus(nexus_url, name, SEARCH_LIMIT, docid_to_name or {})
+            nx_results = search_nexus(nexus_url, name, SEARCH_LIMIT, docid_to_name or {}, rrf_k)
             nx_lat.append(time.perf_counter() - t0)
             nx_rr.append(reciprocal_rank(nx_results, name))
 
@@ -504,13 +506,23 @@ def print_report(metrics: dict, n_queries: int, n_docs: int, title: str = "crate
 def main() -> None:
     parser = argparse.ArgumentParser(description="Nexus vs Tantivy — crates.io benchmark")
     parser.add_argument("--skip-fetch", action="store_true", help="Use cached corpus JSON")
-    parser.add_argument("--nexus-url", default="http://localhost:3000")
+    parser.add_argument("--nexus-url", default="http://localhost:3000",
+                        help="Nexus search URL (gateway or node). Used for /search queries.")
+    parser.add_argument("--nexus-node-url", default=None,
+                        help="Nexus node URL for /index requests. Defaults to --nexus-url. "
+                             "Use when --nexus-url points to a gateway that does not expose /index.")
     parser.add_argument("--no-nexus", action="store_true", help="Tantivy only")
     parser.add_argument("--corpus-size", type=int, default=CORPUS_SIZE)
     parser.add_argument("--query-size", type=int, default=QUERY_SIZE)
+    parser.add_argument(
+        "--rrf-k", type=int, nargs="+", default=[60],
+        metavar="K",
+        help="RRF k value(s) to evaluate. Multiple values trigger a sweep (default: 60).",
+    )
     args = parser.parse_args()
 
     nexus_url = None if args.no_nexus else args.nexus_url
+    nexus_node_url = args.nexus_node_url or nexus_url
 
     if nexus_url:
         try:
@@ -530,17 +542,41 @@ def main() -> None:
 
     docid_to_name: dict[int, str] = {}
     if nexus_url:
-        build_nexus_index(docs, nexus_url)
+        build_nexus_index(docs, nexus_node_url)
         # Build reverse mapping: FNV1a(url) → crate name (mirrors http.rs index_handler)
         for doc in docs:
             url = f"https://crates.io/crates/{doc['name']}"
             docid_to_name[fnv1a_32(url)] = doc["name"]
 
-    metrics = run_benchmark(queries, tantivy_index, nexus_url, docid_to_name)
-    print_report(metrics, n_queries=len(queries), n_docs=len(docs), title="Named-entity retrieval")
+    rrf_k_values: list[int] = args.rrf_k
+    sweep_mode = len(rrf_k_values) > 1 and nexus_url is not None
 
-    nl_metrics = run_nl_benchmark(tantivy_index, nexus_url, docid_to_name)
-    print_report(nl_metrics, n_queries=len(NL_QUERIES), n_docs=len(docs), title="Natural-language queries")
+    if sweep_mode:
+        print(f"\n[rrf-sweep] Sweeping k = {rrf_k_values} on NL queries ...")
+        sweep_results: list[tuple[int, float, float]] = []
+        for k in rrf_k_values:
+            nl = run_nl_benchmark(tantivy_index, nexus_url, docid_to_name, rrf_k=k)
+            nx = nl.get("nexus", {})
+            mrr = nx.get("mrr@10", 0.0)
+            h1 = nx.get("hits@1", 0.0)
+            sweep_results.append((k, mrr, h1))
+
+        # Use k=60 as baseline (Cormack 2009 default); fall back to first value.
+        baseline_mrr = next((m for kk, m, _ in sweep_results if kk == 60), sweep_results[0][1])
+        print(f"\n  {'k':>6}  {'NL MRR@10':>10}  {'NL Hits@1':>10}  {'Delta MRR':>10}")
+        print(f"  {'-' * 44}")
+        for k, mrr, h1 in sweep_results:
+            delta = mrr - baseline_mrr
+            marker = " ← k=60 (Cormack)" if k == 60 else ""
+            print(f"  {k:>6}  {mrr:>10.4f}  {h1:>10.4f}  {delta:>+10.4f}{marker}")
+        print()
+    else:
+        k = rrf_k_values[0]
+        metrics = run_benchmark(queries, tantivy_index, nexus_url, docid_to_name, rrf_k=k)
+        print_report(metrics, n_queries=len(queries), n_docs=len(docs), title="Named-entity retrieval")
+
+        nl_metrics = run_nl_benchmark(tantivy_index, nexus_url, docid_to_name, rrf_k=k)
+        print_report(nl_metrics, n_queries=len(NL_QUERIES), n_docs=len(docs), title="Natural-language queries")
 
 
 if __name__ == "__main__":

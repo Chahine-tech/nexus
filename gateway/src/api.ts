@@ -177,7 +177,9 @@ export const app = new Elysia()
 				opt._tag === "Some" ? [opt.value] : [],
 			);
 
-			const merged = reciprocalRankFusion(allNodeResults);
+			const rawK = parseInt(query.rrf_k ?? "60", 10);
+		const rrfK = Number.isNaN(rawK) || rawK < 1 ? 60 : rawK;
+		const merged = reciprocalRankFusion(allNodeResults, rrfK);
 			const top = merged.slice(0, limit);
 			const answer =
 				query.rag === "true"
@@ -195,6 +197,7 @@ export const app = new Elysia()
 				q: t.Optional(t.String()),
 				limit: t.Optional(t.String()),
 				rag: t.Optional(t.String()),
+				rrf_k: t.Optional(t.String()),
 			}),
 		},
 	)

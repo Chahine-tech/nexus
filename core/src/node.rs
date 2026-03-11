@@ -161,7 +161,7 @@ impl Node {
 
     /// Tokenizes `text` using the node's tokenizer. Used by callers that need
     /// the same token stream as indexing (e.g., to feed terms into the HLL sketch).
-    pub(crate) fn tokenize(&self, text: &str) -> Vec<String> {
+    pub fn tokenize(&self, text: &str) -> Vec<String> {
         self.tokenizer.tokenize(text)
     }
 
@@ -476,6 +476,14 @@ mod tests {
         assert_ne!(fnv1a_32(b"hello"), fnv1a_32(b"world"));
         // Empty input yields the FNV offset basis.
         assert_eq!(fnv1a_32(b""), 2166136261);
+    }
+
+    #[test]
+    fn tokenize_matches_index_pipeline() {
+        let node = Node::new();
+        let tokens = node.tokenize("async runtime tokio");
+        assert!(tokens.contains(&"async".to_owned()));
+        assert!(tokens.contains(&"tokio".to_owned()));
     }
 
     #[test]

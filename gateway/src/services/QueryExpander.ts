@@ -30,6 +30,10 @@ export function expandQuery(
 	const apiKey = process.env.ANTHROPIC_API_KEY;
 	if (!apiKey) return Effect.succeed(query);
 
+	// Short queries (≤2 tokens) are likely proper nouns (crate names, symbols).
+	// Expansion hurts precision: generic synonyms push the exact match down.
+	if (query.trim().split(/\s+/).length <= 2) return Effect.succeed(query);
+
 	return Effect.tryPromise({
 		try: async () => {
 			const client = new Anthropic({ apiKey });
