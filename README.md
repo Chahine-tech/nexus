@@ -56,6 +56,10 @@ python3 tools/benchmark.py --skip-fetch --nexus-url http://localhost:3001
 
 # Smaller run for quick iteration
 python3 tools/benchmark.py --no-nexus --corpus-size 500 --query-size 50
+
+# ef_search recall-latency sweep (requires Nexus node + vector index)
+python3 tools/benchmark.py --skip-fetch --nexus-url http://localhost:3001 \
+  --ef-search 10 20 40 80 160 320
 ```
 
 Dependencies: `pip install requests tantivy tqdm`
@@ -104,6 +108,30 @@ Hybrid overhead (~5 ms) is fastembed ONNX inference on a single CPU core — exp
 > **Result on 2,000-doc corpus**: MRR@10 range across all ε values ≈ 0.007 — statistically negligible. The DP noise perturbs `estimated_global_terms` (gossip-propagated N used for IDF), but BM25 is robust to small N perturbations at this corpus size. The effect grows with corpus size and number of peers; expect more visible degradation at low ε on 50k+ doc deployments.
 >
 > Run: `cargo build -p nexus-core --release && python3 tools/sweep_dp_epsilon.py`
+
+### HNSW ef_search — recall vs latency
+
+`ef_search` controls the beam width during HNSW graph traversal: higher values explore more candidate nodes, improving recall at the cost of latency. The default is `max(limit × 4, 50)`.
+
+Run the sweep (requires node with vector index built):
+
+```bash
+curl -X POST http://localhost:3001/rebuild-vector
+python3 tools/benchmark.py --skip-fetch --nexus-url http://localhost:3001 \
+  --ef-search 10 20 40 80 160 320
+```
+
+| ef_search | NL MRR@10 | P50 ms |
+|-----------|-----------|--------|
+| auto (limit×4) | 0.4193 | 8.62 |
+| 10 | 0.4193 | 8.72 |
+| 20 | 0.4193 | 8.77 |
+| 40 | 0.4193 | 8.76 |
+| 80 | 0.4193 | 8.60 |
+| 160 | 0.4193 | 8.67 |
+| 320 | 0.4193 | 8.67 |
+
+> **Result on 2,000-doc corpus**: MRR@10 is flat across all ef_search values — even ef=10 achieves full recall. On a corpus this small the HNSW graph is shallow (few layers) and greedy search reaches the same neighbours regardless of beam width. Latency (~8.7 ms) is dominated by fastembed ONNX inference, not graph traversal. The ef_search tradeoff becomes visible at 100k+ docs where multi-layer graphs can miss neighbours with a narrow beam.
 
 ## Docs
 

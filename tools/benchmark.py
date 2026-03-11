@@ -176,14 +176,13 @@ def build_nexus_index(docs: list[dict], nexus_url: str) -> None:
     # POST /index accepts {"url": "...", "text": "..."} and indexes directly without crawling.
     # Falls back to the node HTTP port if the gateway URL is provided (gateway proxies /search
     # but not /index — /index is a node-level endpoint on port 3001/3002).
-    index_url = nexus_url
-    print(f"[nexus] Indexing {len(docs):,} crates via {index_url}/index ...")
+    print(f"[nexus] Indexing {len(docs):,} crates via {nexus_url}/index ...")
     ok = errors = 0
     for doc in tqdm(docs, desc="  indexing", unit="crate"):
         body = " ".join(filter(None, [doc["description"], " ".join(doc["keywords"])]))
         try:
             resp = requests.post(
-                f"{index_url}/index",
+                f"{nexus_url}/index",
                 json={
                     "url": f"https://crates.io/crates/{doc['name']}",
                     "name": doc["name"],
@@ -200,11 +199,52 @@ def build_nexus_index(docs: list[dict], nexus_url: str) -> None:
     print(f"[nexus] {ok:,} OK, {errors} errors")
 
 
-def search_nexus(nexus_url: str, query: str, limit: int, docid_to_name: dict[int, str], rrf_k: int = 60) -> list[str]:
+def run_two_node_idf_ab(
+    tantivy_index,
+    gateway_url: str,
+    node1_url: str,
+    node2_url: str,
+    docs: list[dict],
+    docid_to_name: dict[int, str],
+) -> None:
+    """Cross-node IDF A/B: measure MRR before and after gossip convergence.
+
+    Splits corpus 50/50 across two nodes, then compares:
+      - Round 0: MRR immediately after indexing (each node has local IDF only)
+      - Round 1+: MRR after one gossip round (~35s) when global_n is shared via HLL
+    """
+    half = len(docs) // 2
+    print(f"\n[two-node] Indexing {half:,} docs on node1, {len(docs)-half:,} on node2 ...")
+    build_nexus_index(docs[:half], node1_url)
+    build_nexus_index(docs[half:], node2_url)
+
+    def measure_mrr(label: str) -> float:
+        nl = run_nl_benchmark(tantivy_index, gateway_url, docid_to_name)
+        mrr = nl.get("nexus", {}).get("mrr@10", 0.0)
+        h1  = nl.get("nexus", {}).get("hits@1", 0.0)
+        print(f"  [{label}] MRR@10={mrr:.4f}  Hits@1={h1:.4f}")
+        return mrr
+
+    print("\n[two-node] Round 0 — local IDF only (no gossip yet)")
+    mrr_local = measure_mrr("local IDF")
+
+    print("\n[two-node] Waiting 35s for gossip convergence ...")
+    time.sleep(35)
+
+    print("\n[two-node] Round 1 — global IDF via gossip HLL")
+    mrr_global = measure_mrr("global IDF")
+
+    delta = mrr_global - mrr_local
+    sign = "+" if delta >= 0 else ""
+    print(f"\n[two-node] IDF gossip delta: {sign}{delta:.4f}  "
+          f"({'improved' if delta > 0 else 'degraded' if delta < 0 else 'no change'})")
+
+
+def search_nexus(nexus_url: str, query: str, limit: int, docid_to_name: dict[int, str], rrf_k: int = 60, ef_search: Optional[int] = None) -> list[str]:
     try:
         resp = requests.get(
             f"{nexus_url}/search",
-            params={"q": query, "limit": limit, "rrf_k": rrf_k},
+            params={k: v for k, v in {"q": query, "limit": limit, "rrf_k": rrf_k, "ef_search": ef_search}.items() if v is not None},
             timeout=5,
         )
         if resp.status_code != 200:
@@ -354,6 +394,7 @@ def run_nl_benchmark(
     nexus_url: Optional[str],
     docid_to_name: Optional[dict[int, str]] = None,
     rrf_k: int = 60,
+    ef_search: Optional[int] = None,
 ) -> dict:
     """Run the natural-language query set. Each query has one expected crate."""
     print(f"\n[nl-benchmark] Running {len(NL_QUERIES)} natural-language queries ...")
@@ -369,7 +410,7 @@ def run_nl_benchmark(
 
         if nexus_url:
             t0 = time.perf_counter()
-            nx_results = search_nexus(nexus_url, query, SEARCH_LIMIT, docid_to_name or {}, rrf_k)
+            nx_results = search_nexus(nexus_url, query, SEARCH_LIMIT, docid_to_name or {}, rrf_k, ef_search)
             nx_lat.append(time.perf_counter() - t0)
             nx_rr.append(reciprocal_rank(nx_results, expected))
 
@@ -404,6 +445,7 @@ def run_benchmark(
     nexus_url: Optional[str],
     docid_to_name: Optional[dict[int, str]] = None,
     rrf_k: int = 60,
+    ef_search: Optional[int] = None,
 ) -> dict:
     print(f"\n[benchmark] Running {len(queries)} queries ...")
 
@@ -420,7 +462,7 @@ def run_benchmark(
 
         if nexus_url:
             t0 = time.perf_counter()
-            nx_results = search_nexus(nexus_url, name, SEARCH_LIMIT, docid_to_name or {}, rrf_k)
+            nx_results = search_nexus(nexus_url, name, SEARCH_LIMIT, docid_to_name or {}, rrf_k, ef_search)
             nx_lat.append(time.perf_counter() - t0)
             nx_rr.append(reciprocal_rank(nx_results, name))
 
@@ -519,6 +561,19 @@ def main() -> None:
         metavar="K",
         help="RRF k value(s) to evaluate. Multiple values trigger a sweep (default: 60).",
     )
+    parser.add_argument(
+        "--two-node", action="store_true",
+        help="Cross-node IDF A/B: split corpus 50/50 across --nexus-node-url and "
+             "--two-node-url, measure MRR before/after gossip convergence.",
+    )
+    parser.add_argument("--two-node-url", default="http://localhost:3002",
+                        help="Second node URL for --two-node mode (default: http://localhost:3002).")
+    parser.add_argument(
+        "--ef-search", type=int, nargs="+", default=None,
+        metavar="EF",
+        help="HNSW ef_search value(s) to evaluate. Multiple values trigger a recall-latency sweep. "
+             "Default: auto (limit * 4, min 50).",
+    )
     args = parser.parse_args()
 
     nexus_url = None if args.no_nexus else args.nexus_url
@@ -549,9 +604,44 @@ def main() -> None:
             docid_to_name[fnv1a_32(url)] = doc["name"]
 
     rrf_k_values: list[int] = args.rrf_k
+    ef_values: Optional[list[int]] = args.ef_search
     sweep_mode = len(rrf_k_values) > 1 and nexus_url is not None
+    ef_sweep_mode = ef_values is not None and len(ef_values) > 1 and nexus_url is not None
 
-    if sweep_mode:
+    if args.two_node and nexus_url:
+        run_two_node_idf_ab(
+            tantivy_index,
+            gateway_url=nexus_url,
+            node1_url=nexus_node_url,
+            node2_url=args.two_node_url,
+            docs=docs,
+            docid_to_name=docid_to_name,
+        )
+    elif ef_sweep_mode:
+        assert ef_values is not None
+        print(f"\n[ef-sweep] Sweeping ef_search = {ef_values} on NL queries ...")
+        ef_results: list[tuple[int, float, float, float]] = []
+        for ef in ef_values:
+            nl = run_nl_benchmark(tantivy_index, nexus_url, docid_to_name, ef_search=ef)
+            nx = nl.get("nexus", {})
+            mrr = nx.get("mrr@10", 0.0)
+            h1  = nx.get("hits@1", 0.0)
+            p50 = nx.get("p50_ms", 0.0)
+            ef_results.append((ef, mrr, h1, p50))
+
+        # Use ef=None default as baseline — re-run once to get the reference point.
+        nl_base = run_nl_benchmark(tantivy_index, nexus_url, docid_to_name)
+        base_mrr = nl_base.get("nexus", {}).get("mrr@10", 0.0)
+        base_p50 = nl_base.get("nexus", {}).get("p50_ms", 0.0)
+
+        print(f"\n  {'ef_search':>10}  {'NL MRR@10':>10}  {'NL Hits@1':>10}  {'P50 ms':>8}  {'Delta MRR':>10}")
+        print(f"  {'-' * 56}")
+        print(f"  {'auto':>10}  {base_mrr:>10.4f}  {'':>10}  {base_p50:>8.2f}  {'baseline':>10}")
+        for ef, mrr, h1, p50 in ef_results:
+            delta = mrr - base_mrr
+            print(f"  {ef:>10}  {mrr:>10.4f}  {h1:>10.4f}  {p50:>8.2f}  {delta:>+10.4f}")
+        print()
+    elif sweep_mode:
         print(f"\n[rrf-sweep] Sweeping k = {rrf_k_values} on NL queries ...")
         sweep_results: list[tuple[int, float, float]] = []
         for k in rrf_k_values:
@@ -572,10 +662,11 @@ def main() -> None:
         print()
     else:
         k = rrf_k_values[0]
-        metrics = run_benchmark(queries, tantivy_index, nexus_url, docid_to_name, rrf_k=k)
+        ef = ef_values[0] if ef_values else None
+        metrics = run_benchmark(queries, tantivy_index, nexus_url, docid_to_name, rrf_k=k, ef_search=ef)
         print_report(metrics, n_queries=len(queries), n_docs=len(docs), title="Named-entity retrieval")
 
-        nl_metrics = run_nl_benchmark(tantivy_index, nexus_url, docid_to_name, rrf_k=k)
+        nl_metrics = run_nl_benchmark(tantivy_index, nexus_url, docid_to_name, rrf_k=k, ef_search=ef)
         print_report(nl_metrics, n_queries=len(NL_QUERIES), n_docs=len(docs), title="Natural-language queries")
 
 

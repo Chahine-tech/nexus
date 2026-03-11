@@ -37,6 +37,9 @@ pub struct AppState {
 pub struct SearchParams {
     pub q: String,
     pub limit: Option<usize>,
+    /// HNSW beam width for vector ANN search. Higher = better recall, more latency.
+    /// Defaults to `(limit * 4).max(50)` when absent.
+    pub ef_search: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -74,7 +77,7 @@ async fn search_handler(
         .map(|s| s.to_lowercase())
         .collect();
 
-    let results = state.router.route_query(terms, limit, 0).await;
+    let results = state.router.route_query(terms, limit, 0, params.ef_search).await;
     Json(
         results
             .into_iter()

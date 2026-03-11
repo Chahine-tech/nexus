@@ -275,8 +275,10 @@ impl Node {
     ///
     /// Falls back to pure BM25 if the vector index has not been built yet.
     /// Vector search (fastembed ONNX inference) runs on the blocking thread pool.
+    ///
+    /// `ef_search` controls the HNSW beam width. `None` uses the default `(limit * 4).max(50)`.
     #[instrument(skip(self), fields(limit))]
-    pub async fn search_hybrid(&self, query: &str, limit: usize) -> Vec<(u32, f32)> {
+    pub async fn search_hybrid(&self, query: &str, limit: usize, ef_search: Option<usize>) -> Vec<(u32, f32)> {
         let terms = self.tokenizer.tokenize(query);
 
         // Scope the RwLockReadGuard so it is dropped before any .await point.
@@ -308,7 +310,7 @@ impl Node {
             if hybrid_alpha == 0.5 {
                 // No explicit alpha — let QPP predict the optimal blend.
                 HybridScorer::with_fields(name_idx, body_idx, vi)
-                    .search_adaptive_with_pagerank(&query_owned, &terms, limit, pr)
+                    .search_adaptive_with_pagerank_ef(&query_owned, &terms, limit, pr, ef_search)
             } else {
                 // Explicit alpha set via NEXUS_HYBRID_ALPHA — honour it.
                 HybridScorer::new(
@@ -316,7 +318,7 @@ impl Node {
                     vi,
                     hybrid_alpha,
                 )
-                .search_with_pagerank(&terms, limit, pr)
+                .search_with_pagerank_ef(&terms, limit, pr, ef_search)
             }
         })
         .await

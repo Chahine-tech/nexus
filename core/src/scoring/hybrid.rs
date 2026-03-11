@@ -49,15 +49,28 @@ impl HybridScorer {
     }
 
     /// Like `search()` but also blends PageRank as a popularity signal.
+    ///
+    /// `ef_search` controls the HNSW beam width. `None` uses the default `(limit * 4).max(50)`.
     pub fn search_with_pagerank(
         &self,
         terms: &[String],
         limit: usize,
         pagerank: Option<&HashMap<u32, f32>>,
     ) -> Vec<(u32, f32)> {
+        self.search_with_pagerank_ef(terms, limit, pagerank, None)
+    }
+
+    /// Like `search_with_pagerank()` but with an explicit `ef_search` for the HNSW ANN step.
+    pub fn search_with_pagerank_ef(
+        &self,
+        terms: &[String],
+        limit: usize,
+        pagerank: Option<&HashMap<u32, f32>>,
+        ef_search: Option<usize>,
+    ) -> Vec<(u32, f32)> {
         let fetch = (limit * 4).max(20);
         let bm25_hits = self.bm25.search(terms, fetch);
-        let vec_hits = self.vector.search(&terms.join(" "), fetch);
+        let vec_hits = self.vector.search(&terms.join(" "), fetch, ef_search);
         hybrid_combine(bm25_hits, vec_hits, self.alpha, pagerank, limit)
     }
 
@@ -81,6 +94,18 @@ impl HybridScorer {
         limit: usize,
         pagerank: Option<&HashMap<u32, f32>>,
     ) -> Vec<(u32, f32)> {
+        self.search_adaptive_with_pagerank_ef(raw_query, terms, limit, pagerank, None)
+    }
+
+    /// Like `search_adaptive_with_pagerank()` but with an explicit `ef_search`.
+    pub fn search_adaptive_with_pagerank_ef(
+        &self,
+        raw_query: &str,
+        terms: &[String],
+        limit: usize,
+        pagerank: Option<&HashMap<u32, f32>>,
+        ef_search: Option<usize>,
+    ) -> Vec<(u32, f32)> {
         // Use the last field (body) for IDF features — it has the richest term distribution.
         let feature_index = self.bm25.fields.last().map(|f| &*f.index)
             .unwrap_or_else(|| &*self.bm25.fields[0].index);
@@ -89,7 +114,7 @@ impl HybridScorer {
         tracing::debug!(alpha, query = raw_query, "adaptive alpha predicted");
         let fetch = (limit * 4).max(20);
         let bm25_hits = self.bm25.search(terms, fetch);
-        let vec_hits = self.vector.search(raw_query, fetch);
+        let vec_hits = self.vector.search(raw_query, fetch, ef_search);
         hybrid_combine(bm25_hits, vec_hits, alpha, pagerank, limit)
     }
 }

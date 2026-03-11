@@ -64,12 +64,14 @@ impl QueryRouter {
     /// Routes a query: local BM25 for own shards, QUIC fanout for remote shards.
     ///
     /// Lock is acquired only to determine shard assignment, then released before any .await.
+    /// `ef_search` is forwarded to the local HNSW vector search step only.
     #[instrument(skip(self), fields(terms_count = terms.len(), limit, request_id))]
     pub async fn route_query(
         &self,
         terms: Vec<String>,
         limit: usize,
         request_id: u64,
+        ef_search: Option<usize>,
     ) -> Vec<(u32, f32)> {
         if terms.is_empty() {
             return vec![];
@@ -111,7 +113,7 @@ impl QueryRouter {
             vec![]
         } else {
             let query = local_terms.join(" ");
-            self.node.search_hybrid(&query, limit).await
+            self.node.search_hybrid(&query, limit, ef_search).await
         };
 
         // Step 3: Remote fanout (concurrent) — skip peers below trust threshold.
@@ -230,7 +232,7 @@ mod tests {
     #[tokio::test]
     async fn empty_terms_returns_empty() {
         let router = make_router_empty_table().await;
-        let results = router.route_query(vec![], 10, 0).await;
+        let results = router.route_query(vec![], 10, 0, None).await;
         assert!(results.is_empty());
     }
 
@@ -242,7 +244,7 @@ mod tests {
         router.node.index_document(0, "rust async await futures");
         router.node.index_document(1, "python scripting dynamic");
 
-        let results = router.route_query(vec!["rust".to_string()], 10, 1).await;
+        let results = router.route_query(vec!["rust".to_string()], 10, 1, None).await;
         // Should find doc 0 locally.
         assert!(!results.is_empty());
         assert_eq!(results[0].0, 0);
@@ -255,7 +257,7 @@ mod tests {
         router.node.index_document(1, "rust python");
         router.node.index_document(2, "python only");
 
-        let results = router.route_query(vec!["rust".to_string()], 10, 2).await;
+        let results = router.route_query(vec!["rust".to_string()], 10, 2, None).await;
         for i in 1..results.len() {
             assert!(
                 results[i - 1].1 >= results[i].1,

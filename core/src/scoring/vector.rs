@@ -91,8 +91,11 @@ impl VectorIndex {
     /// Returns up to `limit` `(doc_id, cosine_similarity)` pairs sorted by descending
     /// similarity. Returns empty if HNSW has no insertions or embedding fails.
     ///
+    /// `ef_search` controls the beam width during graph traversal: higher values yield
+    /// better recall at the cost of latency. When `None`, defaults to `(limit * 4).max(50)`.
+    ///
     /// Blocking. In async context, wrap with `tokio::task::spawn_blocking`.
-    pub fn search(&self, query: &str, limit: usize) -> Vec<(u32, f32)> {
+    pub fn search(&self, query: &str, limit: usize, ef_search: Option<usize>) -> Vec<(u32, f32)> {
         if limit == 0 || query.is_empty() {
             return Vec::new();
         }
@@ -103,8 +106,8 @@ impl VectorIndex {
                 return Vec::new();
             }
         };
-        let ef_search = (limit * 4).max(50);
-        let neighbours = self.hnsw.search(&embedding, limit, ef_search);
+        let ef = ef_search.unwrap_or_else(|| (limit * 4).max(50));
+        let neighbours = self.hnsw.search(&embedding, limit, ef);
         neighbours.into_iter().map(|n| (n.d_id as u32, 1.0 - n.distance)).collect()
     }
 
@@ -202,7 +205,7 @@ mod tests {
         vi.insert(1, "python scripting dynamic language").expect("insert 1");
         vi.insert(2, "rust performance systems programming").expect("insert 2");
 
-        let results = vi.search("async rust concurrency", 3);
+        let results = vi.search("async rust concurrency", 3, None);
         assert!(!results.is_empty(), "expected non-empty results");
         let ids: Vec<u32> = results.iter().map(|(id, _)| *id).collect();
         // Docs 0 and 2 are about Rust; doc 1 is Python.
@@ -213,7 +216,7 @@ mod tests {
     #[ignore = "requires fastembed model download (~130 MB)"]
     fn test_search_before_insert_returns_empty() {
         let vi = VectorIndex::new().expect("build VectorIndex");
-        let results = vi.search("rust", 5);
+        let results = vi.search("rust", 5, None);
         assert!(results.is_empty(), "empty HNSW should return no results");
     }
 
@@ -229,7 +232,7 @@ mod tests {
         let refs: Vec<(u32, &str)> = docs.iter().map(|(id, t)| (*id, *t)).collect();
         vi.batch_insert(&refs).expect("batch insert");
 
-        let results = vi.search("safe memory management rust", 3);
+        let results = vi.search("safe memory management rust", 3, None);
         assert!(!results.is_empty());
         let ids: Vec<u32> = results.iter().map(|(id, _)| *id).collect();
         assert!(ids.contains(&2), "rust doc should rank high for memory safety query");
@@ -243,7 +246,7 @@ mod tests {
         vi.insert(1, "python web django flask").expect("insert");
         vi.insert(2, "rust systems performance").expect("insert");
 
-        let results = vi.search("rust programming", 3);
+        let results = vi.search("rust programming", 3, None);
         for window in results.windows(2) {
             assert!(
                 window[0].1 >= window[1].1,
