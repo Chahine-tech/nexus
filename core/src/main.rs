@@ -377,7 +377,6 @@ async fn main() -> anyhow::Result<()> {
         router: query_router,
         node: search_node,
         gossip: Arc::clone(&gossip),
-        routing_table: Arc::clone(&routing_table),
         data_dir: PathBuf::from(&data_dir),
     });
     let listener = tokio::net::TcpListener::bind(http_addr).await?;

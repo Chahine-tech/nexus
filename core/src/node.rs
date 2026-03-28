@@ -193,6 +193,7 @@ impl Node {
     ///
     /// Used by shard-merge logic to decide whether to merge a remote posting list
     /// into the local index. Returns an error only if internal serialization fails.
+    #[allow(dead_code)]
     pub fn posting_df(&self, term: &str) -> Result<u64, InvertedIndexError> {
         Ok(self.index.lookup(term).map(|pl| pl.len()).unwrap_or(0))
     }
@@ -216,6 +217,7 @@ impl Node {
     /// Returns true if this node is the XOR-closest peer to `term`'s blake3 key.
     ///
     /// Returns true when the routing table is empty (single-node network owns all shards).
+    #[allow(dead_code)]
     pub fn responsible_for(&self, term: &str, table: &RoutingTable) -> bool {
         match table.responsible_node(term) {
             Some(closest) => closest.id == table.local_id,
@@ -381,6 +383,7 @@ impl Node {
     }
 
     /// Returns the PageRank score for `doc_id`. Returns `0.0` if unknown.
+    #[allow(dead_code)]
     pub fn pagerank_score(&self, doc_id: u32) -> f32 {
         self.pagerank.read().expect("pagerank RwLock poisoned").score(doc_id)
     }

@@ -193,7 +193,13 @@ fn decompress_stream(bytes: &[u8], count: usize) -> Result<Vec<u32>, String> {
         cursor += compressed_len;
     }
 
-    debug_assert_eq!(cursor, bytes.len(), "all compressed bytes consumed");
+    if cursor != bytes.len() {
+        return Err(format!(
+            "compressed stream has {} trailing bytes (cursor={cursor}, total={})",
+            bytes.len() - cursor,
+            bytes.len()
+        ));
+    }
     Ok(result)
 }
 

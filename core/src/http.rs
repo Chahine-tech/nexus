@@ -8,11 +8,8 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use std::sync::Mutex;
-
 use crate::crawler::engine::{Crawler, CrawlerConfig};
 use crate::network::gossip::GossipEngine;
-use crate::network::kademlia::RoutingTable;
 use crate::network::query_router::QueryRouter;
 use crate::node::Node;
 
@@ -28,7 +25,6 @@ pub struct AppState {
     pub router: Arc<QueryRouter>,
     pub node: Arc<Node>,
     pub gossip: Arc<GossipEngine>,
-    pub routing_table: Arc<Mutex<RoutingTable>>,
     /// Directory where persistent data (index, vector index) is stored.
     pub data_dir: std::path::PathBuf,
 }
@@ -139,23 +135,6 @@ async fn stats_handler(State(state): State<AppState>) -> Json<StatsResponse> {
     // Sync local doc_count into gossip, then propagate global N into BM25 scorer.
     state.gossip.update_local(state.node.doc_count());
     state.node.update_global_doc_count(state.gossip.global_doc_count());
-    // Wire global_pagerank and pagerank_score for the top-ranked doc.
-    if let Some((top_doc_id, _)) = state.node.pagerank_ranked().first() {
-        let _ = state.gossip.global_pagerank(*top_doc_id);
-        let _ = state.node.pagerank_score(*top_doc_id);
-    }
-    // Wire Node::responsible_for — check shard ownership for a sentinel term.
-    let is_responsible = if let Ok(table) = state.routing_table.lock() {
-        state.node.responsible_for("__health_check__", &table)
-    } else {
-        true
-    };
-    let _ = is_responsible;
-
-    // Wire posting_df (uses InvertedIndex::lookup) and merge_posting_shard
-    // (uses PostingList::merge + is_empty + PostingError).
-    let _ = state.node.posting_df("__sentinel__");
-    let _ = state.node.merge_posting_shard("__sentinel__", Default::default());
 
     Json(StatsResponse {
         doc_count: state.node.doc_count(),

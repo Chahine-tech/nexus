@@ -87,7 +87,7 @@ impl Crawler {
 
         // BFS crawl loop.
         loop {
-            let Some(url) = self.frontier.pop() else {
+            let Some((url, depth)) = self.frontier.pop() else {
                 break;
             };
 
@@ -168,10 +168,7 @@ impl Crawler {
                             }
                         }
 
-                        // Depth is unknown at this point (frontier doesn't track it per URL).
-                        // We pass depth=1 so enqueue_links applies max_depth filtering at
-                        // the frontier level relative to the seed (simplification for week 1).
-                        frontier.enqueue_links(new_links, 1);
+                        frontier.enqueue_links(new_links, depth);
                     }
                     Err(e) => {
                         tracing::warn!(%url, error = %e, "fetch failed");

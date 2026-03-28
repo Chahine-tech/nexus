@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::indexer::posting::PostingList;
 
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum InvertedIndexError {
     #[error("serialization failed: {0}")]
     Serialization(#[from] rmp_serde::encode::Error),

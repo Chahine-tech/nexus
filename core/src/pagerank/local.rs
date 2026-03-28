@@ -113,6 +113,7 @@ impl LocalPageRank {
     }
 
     /// Returns the PageRank score for `doc_id`. Returns `0.0` if unknown or before `iterate()`.
+    #[allow(dead_code)]
     pub fn score(&self, doc_id: u32) -> f32 {
         self.scores.get(&doc_id).copied().unwrap_or(0.0)
     }

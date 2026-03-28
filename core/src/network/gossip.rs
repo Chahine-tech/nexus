@@ -287,6 +287,7 @@ impl GossipEngine {
     /// if no scores are available.
     ///
     /// Lock released before iterating `peer_pagerank` — no lock held across DashMap scan.
+    #[allow(dead_code)]
     pub fn global_pagerank(&self, doc_id: u32) -> f32 {
         // Clone local scores (lock released immediately).
         let local_scores = {

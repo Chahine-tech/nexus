@@ -5,10 +5,14 @@ use url::Url;
 
 /// FIFO frontier of URLs to crawl, with a visited set to avoid re-crawling.
 ///
+/// Each entry tracks its crawl depth so `max_depth` is correctly enforced
+/// across all BFS levels, not just the first hop.
+///
 /// No async operations held across lock — `std::sync::Mutex` is correct here.
 /// Use behind `Arc<Frontier>` across tokio tasks.
 pub struct Frontier {
-    queue: Mutex<VecDeque<Url>>,
+    /// (url, depth) — depth of the URL when it was enqueued.
+    queue: Mutex<VecDeque<(Url, usize)>>,
     visited: Mutex<HashSet<String>>,
     max_depth: usize,
 }
@@ -22,23 +26,25 @@ impl Frontier {
         }
     }
 
-    /// Seeds the frontier with an initial URL.
+    /// Seeds the frontier with an initial URL at depth 0.
     pub fn seed(&self, url: Url) {
         let key = canonical_key(&url);
         let mut visited = self.visited.lock().expect("frontier visited mutex poisoned");
         if visited.insert(key) {
-            self.queue.lock().expect("frontier queue mutex poisoned").push_back(url);
+            self.queue.lock().expect("frontier queue mutex poisoned").push_back((url, 0));
         }
     }
 
-    /// Pops the next URL to crawl, or `None` if the queue is empty.
-    pub fn pop(&self) -> Option<Url> {
+    /// Pops the next `(url, depth)` to crawl, or `None` if the queue is empty.
+    pub fn pop(&self) -> Option<(Url, usize)> {
         self.queue.lock().expect("frontier queue mutex poisoned").pop_front()
     }
 
-    /// Enqueues `links` discovered at `depth`, filtering already-visited URLs.
-    pub fn enqueue_links(&self, links: Vec<Url>, depth: usize) {
-        if depth >= self.max_depth {
+    /// Enqueues `links` discovered at `parent_depth + 1`, filtering already-visited URLs
+    /// and URLs that would exceed `max_depth`.
+    pub fn enqueue_links(&self, links: Vec<Url>, parent_depth: usize) {
+        let child_depth = parent_depth + 1;
+        if child_depth >= self.max_depth {
             return;
         }
         let mut visited = self.visited.lock().expect("frontier visited mutex poisoned");
@@ -46,7 +52,7 @@ impl Frontier {
         for url in links {
             let key = canonical_key(&url);
             if visited.insert(key) {
-                queue.push_back(url);
+                queue.push_back((url, child_depth));
             }
         }
     }
@@ -80,7 +86,9 @@ mod tests {
         let url = Url::parse("https://example.com").unwrap();
         f.seed(url.clone());
         assert_eq!(f.queue_len(), 1);
-        assert!(f.pop().is_some());
+        let entry = f.pop();
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().1, 0); // seed is always depth 0
         assert_eq!(f.queue_len(), 0);
     }
 
@@ -99,7 +107,17 @@ mod tests {
     fn test_max_depth_respected() {
         let f = Frontier::new(2);
         let links = vec![Url::parse("https://example.com/deep").unwrap()];
-        f.enqueue_links(links, 2); // depth == max_depth, should not enqueue
+        // parent_depth=1, child_depth=2 == max_depth → should not enqueue
+        f.enqueue_links(links, 1);
         assert_eq!(f.queue_len(), 0);
+    }
+
+    #[test]
+    fn test_depth_propagated() {
+        let f = Frontier::new(5);
+        let links = vec![Url::parse("https://example.com/level2").unwrap()];
+        f.enqueue_links(links, 1); // child_depth = 2
+        let entry = f.pop().unwrap();
+        assert_eq!(entry.1, 2);
     }
 }
