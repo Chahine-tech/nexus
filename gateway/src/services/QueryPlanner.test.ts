@@ -50,17 +50,20 @@ describe("planQuery", () => {
 		expect(plan.shards).toHaveLength(0);
 	});
 
-	test("broadcasts full query to all live nodes", () => {
+	test("routes each term to its responsible node (term-sharded)", () => {
 		// Register two nodes for this test (shared singleton).
 		registry.registerFromRust(nodeA.nodeId, nodeA.url);
 		registry.registerFromRust(nodeB.nodeId, nodeB.url);
 
-		const plan = planQuery("rust async concurrency python");
+		// blake3("python") → nodeA (aaaa...), blake3("rust") → nodeB (bbbb...).
+		const plan = planQuery("python rust");
 
-		// Every shard receives all query terms (broadcast, not term-sharded).
-		expect(plan.shards.length).toBeGreaterThanOrEqual(2);
-		for (const shard of plan.shards) {
-			expect(shard.terms.sort()).toEqual(["async", "concurrency", "python", "rust"]);
-		}
+		// Two shards: one for nodeA (python), one for nodeB (rust).
+		expect(plan.shards.length).toBe(2);
+
+		const shardA = plan.shards.find((s) => s.nodeId === nodeA.nodeId);
+		const shardB = plan.shards.find((s) => s.nodeId === nodeB.nodeId);
+		expect(shardA?.terms).toEqual(["python"]);
+		expect(shardB?.terms).toEqual(["rust"]);
 	});
 });

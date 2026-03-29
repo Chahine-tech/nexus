@@ -13,8 +13,8 @@ import { registry } from "./services/NodeRegistry";
 import { expandQuery } from "./services/QueryExpander";
 import { planQuery } from "./services/QueryPlanner";
 import { RAG_PROMPT, ragPipeline } from "./services/RagPipeline";
-import { rebalanceNode } from "./services/RebalanceService";
 import { rateLimiter } from "./services/RateLimiter";
+import { rebalanceNode } from "./services/RebalanceService";
 
 // Register rebalance hook once: when a node dies, transfer its shards.
 registry.onNodeDead((nodeId, url) => {
@@ -178,8 +178,8 @@ export const app = new Elysia()
 			);
 
 			const rawK = parseInt(query.rrf_k ?? "60", 10);
-		const rrfK = Number.isNaN(rawK) || rawK < 1 ? 60 : rawK;
-		const merged = reciprocalRankFusion(allNodeResults, rrfK);
+			const rrfK = Number.isNaN(rawK) || rawK < 1 ? 60 : rawK;
+			const merged = reciprocalRankFusion(allNodeResults, rrfK);
 			const top = merged.slice(0, limit);
 			const answer =
 				query.rag === "true"

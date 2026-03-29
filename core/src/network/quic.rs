@@ -111,6 +111,17 @@ impl QuicTransport {
     /// on the message layer instead.
     #[instrument(skip(keypair), fields(%addr))]
     pub async fn bind(addr: SocketAddr, keypair: &NodeKeypair) -> Result<Self, TransportError> {
+        let client_config = Self::default_client_config()?;
+        Self::bind_with_client_config(addr, keypair, client_config).await
+    }
+
+    /// Like `bind` but accepts a custom `quinn::ClientConfig` — useful in tests
+    /// to set a short idle timeout so unreachable-peer tests don't wait 30s.
+    pub async fn bind_with_client_config(
+        addr: SocketAddr,
+        keypair: &NodeKeypair,
+        client_config: quinn::ClientConfig,
+    ) -> Result<Self, TransportError> {
         // 1. Generate self-signed certificate via rcgen.
         let CertifiedKey { cert, key_pair } =
             generate_simple_self_signed(vec!["nexus".to_string()])
@@ -125,22 +136,22 @@ impl QuicTransport {
             quinn::ServerConfig::with_single_cert(vec![cert_der], key_der)
                 .map_err(|e| TransportError::Tls(e.to_string()))?;
 
-        // 3. Client config — skip cert verification for P2P.
-        let rustls_client = ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-            .with_no_client_auth();
-
-        let client_config = quinn::ClientConfig::new(Arc::new(
-            quinn::crypto::rustls::QuicClientConfig::try_from(rustls_client)
-                .map_err(|e| TransportError::Tls(e.to_string()))?,
-        ));
-
-        // 4. Create endpoint.
+        // 3. Create endpoint.
         let mut endpoint = quinn::Endpoint::server(server_config, addr)?;
         endpoint.set_default_client_config(client_config);
 
         Ok(Self { endpoint, node_id: keypair.node_id() })
+    }
+
+    fn default_client_config() -> Result<quinn::ClientConfig, TransportError> {
+        let rustls_client = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+            .with_no_client_auth();
+        Ok(quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(rustls_client)
+                .map_err(|e| TransportError::Tls(e.to_string()))?,
+        )))
     }
 
     /// Opens a QUIC connection to `addr`.

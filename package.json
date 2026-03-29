@@ -5,5 +5,8 @@
   "workspaces": ["gateway", "proto"],
   "scripts": {
     "gateway": "bun run --filter gateway dev"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.0.1"
   }
 }

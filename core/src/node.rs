@@ -10,6 +10,7 @@ use crate::ast::normalizer::tokens_from_features;
 use crate::ast::parser::{AstError, AstParser};
 use crate::indexer::inverted::{InvertedIndex, InvertedIndexError};
 use crate::indexer::posting::{PostingError, PostingList};
+use crate::indexer::storage::NodeSnapshot;
 use crate::indexer::tokenizer::Tokenizer;
 use crate::network::kademlia::RoutingTable;
 use crate::pagerank::local::LocalPageRank;
@@ -71,6 +72,49 @@ impl Node {
             doc_index: DashMap::new(),
             doc_text: DashMap::new(),
             global_n,
+        }
+    }
+
+    /// Restores a `Node` from a persisted `NodeSnapshot` plus a pre-loaded flat index.
+    ///
+    /// Called at startup when both `index.msgpack` and `node.msgpack` exist on disk.
+    /// The flat `index` must be loaded separately via `storage::load`.
+    pub fn from_snapshot(index: Arc<InvertedIndex>, snap: NodeSnapshot) -> Self {
+        let name_index = Arc::new(snap.name_index);
+        let body_index = Arc::new(snap.body_index);
+        let tokenizer = Tokenizer::new();
+        let scorer = Bm25Scorer::with_fields(Arc::clone(&name_index), Arc::clone(&body_index));
+        let global_n = scorer.global_n_handle();
+        let pagerank = LocalPageRank::from_snapshots(snap.pagerank_graph, snap.pagerank_scores);
+        Self {
+            index,
+            name_index,
+            body_index,
+            tokenizer,
+            scorer,
+            vector: RwLock::new(None),
+            hybrid_alpha: 0.5,
+            pagerank: RwLock::new(pagerank),
+            url_index: snap.url_index.into_iter().collect(),
+            doc_index: snap.doc_index.into_iter().collect(),
+            doc_text: snap.doc_text.into_iter().collect(),
+            global_n,
+        }
+    }
+
+    /// Captures the current node state into a `NodeSnapshot` for persistence.
+    ///
+    /// Excludes the flat `index` (saved separately via `storage::save`).
+    pub fn take_snapshot(&self) -> NodeSnapshot {
+        let pr = self.pagerank.read().expect("pagerank RwLock poisoned");
+        NodeSnapshot {
+            name_index: (*self.name_index).clone(),
+            body_index: (*self.body_index).clone(),
+            url_index: self.url_index.iter().map(|e| (e.key().clone(), *e.value())).collect(),
+            doc_index: self.doc_index.iter().map(|e| (*e.key(), e.value().clone())).collect(),
+            doc_text: self.doc_text.iter().map(|e| (*e.key(), e.value().clone())).collect(),
+            pagerank_graph: pr.graph_snapshot(),
+            pagerank_scores: pr.scores_snapshot(),
         }
     }
 

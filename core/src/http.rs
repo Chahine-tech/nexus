@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::crawler::engine::{Crawler, CrawlerConfig};
+use crate::indexer::storage;
 use crate::network::gossip::GossipEngine;
 use crate::network::query_router::QueryRouter;
 use crate::node::Node;
@@ -243,6 +244,22 @@ async fn index_handler(
     // Sync local doc_count into gossip so global_doc_count() is accurate immediately.
     state.gossip.update_local(state.node.doc_count());
     state.node.update_global_doc_count(state.gossip.global_doc_count());
+
+    // Persist the updated node snapshot and flat index asynchronously.
+    // Fire-and-forget: errors are logged but do not fail the HTTP response.
+    let node = Arc::clone(&state.node);
+    let index_path = state.data_dir.join("index.msgpack");
+    let node_path = state.data_dir.join("node.msgpack");
+    tokio::spawn(async move {
+        let snap = node.take_snapshot();
+        if let Err(e) = storage::save_node_snapshot(&snap, &node_path) {
+            tracing::warn!(error = %e, "failed to persist node snapshot after /index");
+        }
+        if let Err(e) = storage::save(&node.index, &index_path) {
+            tracing::warn!(error = %e, "failed to persist index after /index");
+        }
+    });
+
     StatusCode::OK
 }
 

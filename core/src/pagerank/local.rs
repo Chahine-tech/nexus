@@ -133,6 +133,28 @@ impl LocalPageRank {
     pub fn scores_snapshot(&self) -> HashMap<u32, f32> {
         self.scores.clone()
     }
+
+    /// Returns the link graph as a serializable `HashMap<u32, Vec<u32>>`.
+    pub fn graph_snapshot(&self) -> HashMap<u32, Vec<u32>> {
+        self.graph
+            .iter()
+            .map(|(&src, dsts)| (src, dsts.iter().copied().collect()))
+            .collect()
+    }
+
+    /// Restores a `LocalPageRank` from persisted graph and score snapshots.
+    pub fn from_snapshots(
+        graph: HashMap<u32, Vec<u32>>,
+        scores: HashMap<u32, f32>,
+    ) -> Self {
+        Self {
+            graph: graph
+                .into_iter()
+                .map(|(src, dsts)| (src, dsts.into_iter().collect()))
+                .collect(),
+            scores,
+        }
+    }
 }
 
 impl Default for LocalPageRank {

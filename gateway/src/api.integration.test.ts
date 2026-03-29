@@ -197,8 +197,10 @@ describe("GET /search", () => {
 	});
 
 	test("fan-out across two nodes merges results via RRF", async () => {
-		// "async" hashes to nodeA (aaaa...), "rust" hashes to nodeB (bbbb...) — verified by XOR.
-		nodeA.docs.set("async", 1);
+		// blake3("python") XOR-closest to nodeA (aaaa...).
+		// blake3("rust")   XOR-closest to nodeB (bbbb...).
+		// Each shard receives only its term, so both docs must appear in the merged result.
+		nodeA.docs.set("python", 1);
 		nodeB.docs.set("rust", 2);
 
 		for (const node of [nodeA, nodeB]) {
@@ -212,7 +214,7 @@ describe("GET /search", () => {
 		}
 
 		const res = await app.handle(
-			new Request("http://localhost/search?q=async+rust&limit=10"),
+			new Request("http://localhost/search?q=python+rust&limit=10"),
 		);
 		expect(res.status).toBe(200);
 		const body = await asJson<SearchBody>(res);
@@ -221,12 +223,16 @@ describe("GET /search", () => {
 		expect(ids).toContain("1");
 		expect(ids).toContain("2");
 
-		nodeA.docs.delete("async");
+		nodeA.docs.delete("python");
 		nodeB.docs.delete("rust");
 	});
 
 	test("dead node is skipped gracefully — other shards still return results", async () => {
-		nodeA.docs.set("search", 10);
+		// blake3("python") routes to nodeA (aaaa...) — nodeA is live, dead node is cc..cc.
+		// blake3("rust") routes to nodeB (bbbb...) which is not registered here.
+		// We query only "python" so nodeA handles it; the dead node owns no terms in this query.
+		// To guarantee nodeA is chosen over the dead node (cc..cc), we query "python".
+		nodeA.docs.set("python", 10);
 
 		// Register nodeA (live) and a dead node (port nobody listens on).
 		await app.handle(
@@ -248,15 +254,15 @@ describe("GET /search", () => {
 		);
 
 		const res = await app.handle(
-			new Request("http://localhost/search?q=search&limit=5"),
+			new Request("http://localhost/search?q=python&limit=5"),
 		);
 		expect(res.status).toBe(200);
 		const body = await asJson<SearchBody>(res);
-		// nodeA responds; dead node is silently skipped.
+		// nodeA responds with doc 10; dead node owns no terms in this query.
 		const ids = body.results.map((r) => r.id);
 		expect(ids).toContain("10");
 
-		nodeA.docs.delete("search");
+		nodeA.docs.delete("python");
 	});
 });
 

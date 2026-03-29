@@ -54,4 +54,7 @@ export class RateLimiter {
 }
 
 // Singleton — 60 requests per minute per IP on /search.
-export const rateLimiter = new RateLimiter({ windowMs: 60_000, maxRequests: 60 });
+export const rateLimiter = new RateLimiter({
+	windowMs: 60_000,
+	maxRequests: 60,
+});

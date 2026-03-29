@@ -133,6 +133,25 @@ impl Default for InvertedIndex {
     }
 }
 
+impl Clone for InvertedIndex {
+    fn clone(&self) -> Self {
+        InvertedIndex {
+            postings: self
+                .postings
+                .iter()
+                .map(|e| (e.key().clone(), e.value().clone()))
+                .collect(),
+            doc_lengths: self
+                .doc_lengths
+                .iter()
+                .map(|e| (*e.key(), *e.value()))
+                .collect(),
+            doc_count: AtomicU64::new(self.doc_count.load(Ordering::Relaxed)),
+            total_token_sum: AtomicU64::new(self.total_token_sum.load(Ordering::Relaxed)),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Serialization — DashMap ↔ HashMap snapshot
 // ---------------------------------------------------------------------------

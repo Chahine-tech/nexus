@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Load existing index from disk, or start fresh.
     let data_path = PathBuf::from(&data_dir).join("index.msgpack");
+    let node_path = PathBuf::from(&data_dir).join("node.msgpack");
     let index = match storage::load(&data_path) {
         Ok(Some(idx)) => {
             tracing::info!(doc_count = idx.doc_count(), "loaded index from disk");
@@ -83,7 +84,23 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let vector_dir = PathBuf::from(&data_dir);
-    let search_node = Arc::new(Node::from_index(index));
+
+    // Restore full node state (fielded indexes, URL maps, doc texts, PageRank)
+    // from the companion node snapshot, or fall back to a bare node.
+    let search_node = match storage::load_node_snapshot(&node_path) {
+        Ok(Some(snap)) => {
+            tracing::info!("node snapshot restored from disk");
+            Arc::new(Node::from_snapshot(index, snap))
+        }
+        Ok(None) => {
+            tracing::info!("no node snapshot found, starting fresh");
+            Arc::new(Node::from_index(index))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load node snapshot, starting fresh");
+            Arc::new(Node::from_index(index))
+        }
+    };
 
     // Try to restore a previously saved vector index from disk.
     match search_node.try_load_vector_index(&vector_dir).await {
@@ -246,6 +263,7 @@ async fn main() -> anyhow::Result<()> {
         let crawl_node = Arc::clone(&search_node);
         let crawl_gossip = Arc::clone(&gossip);
         let crawl_path = data_path.clone();
+        let crawl_node_path = node_path.clone();
 
         tokio::spawn(async move {
             match crawler::engine::Crawler::new(
@@ -280,6 +298,14 @@ async fn main() -> anyhow::Result<()> {
                         tracing::error!(error = %e, "failed to persist index");
                     } else {
                         tracing::info!("index persisted to disk");
+                    }
+
+                    // Persist node snapshot (fielded indexes, URL maps, doc texts, PageRank).
+                    let snap = crawl_node.take_snapshot();
+                    if let Err(e) = storage::save_node_snapshot(&snap, &crawl_node_path) {
+                        tracing::error!(error = %e, "failed to persist node snapshot");
+                    } else {
+                        tracing::info!("node snapshot persisted to disk");
                     }
                 }
                 Err(e) => tracing::error!(error = %e, "crawler init failed"),
